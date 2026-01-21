@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 from torchvision.transforms import GaussianBlur
 import math
-from unet import Unet
+from denoisers.unet import Unet
 from tqdm import tqdm
 
 class MNISTDiffusion(nn.Module):
@@ -48,23 +48,6 @@ class MNISTDiffusion(nn.Module):
         pred_noise = self.model(x_t, t, guiding_cond)
 
         return pred_noise
-
-    # @torch.no_grad()
-    # def sampling(self,n_samples,clipped_reverse_diffusion=True,device="cuda",x_cond=None):
-    #     x_t=torch.randn((n_samples,self.in_channels,self.image_size,self.image_size)).to(device)
-
-    #     for i in tqdm(range(self.timesteps-1,-1,-1),desc="Sampling"):
-    #         noise=torch.randn_like(x_t).to(device)
-    #         t=torch.tensor([i for _ in range(n_samples)]).to(device)
-
-    #         if clipped_reverse_diffusion:
-    #             x_t=self._reverse_diffusion_with_clip(x_t,t,noise,x_cond)
-    #         else:
-    #             x_t=self._reverse_diffusion(x_t,t,noise,x_cond)
-
-    #     x_t=(x_t+1.)/2. #[-1,1] to [0,1]
-
-    #     return x_t
     
     @torch.no_grad()
     def sampling(self, n_samples, clipped_reverse_diffusion=True, device="cuda", x_cond=None, sampling_steps: int = 150):

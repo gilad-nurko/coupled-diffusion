@@ -10,33 +10,23 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
-from model_y_cond_iterative_diffusion_true_noising_cifar100 import MNISTDiffusion
-from classifier_imagenet32_100subset import (
+from diffusion_models.model_alternating_100_classes import MNISTDiffusion
+from classifiers.classifier_imagenet32_100subset import (
     ImageNet32ResNet,
     build_imagenet32_datasets,
 )
 from utils import ExponentialMovingAverage
 
 
-# # -------------------------------------------------------------------
-# # ImageNet-32 normalization (set these to what you used for classifier)
-# # -------------------------------------------------------------------
-# IMAGENET32_MEAN = (0.4811, 0.4575, 0.4079)  
-# IMAGENET32_STD  = (0.2604, 0.2532, 0.2682)  
-
-
 def create_imagenet32_100_dataloaders(
     batch_size,
     image_size=32,      # kept for interface compatibility
     num_workers=4,
-    root="/mlspeech/data/gilad/imagenet32",
+    root="",
     num_subset_classes=100,
     seed=42,
 ):
-    """
-    Uses build_imagenet32_datasets from classifier_imagenet32_100subset.py
-    to get the 100-class subset (train/test) from NPZ files.
-    """
+
     train_dataset, test_dataset = build_imagenet32_datasets(
         root=root,
         num_subset_classes=num_subset_classes,
@@ -87,7 +77,6 @@ def parse_args():
 
     parser.add_argument('--num_classes', type=int, default=100)
     parser.add_argument('--mode', type=str, default="imagenet32")
-    parser.add_argument('--pretrained_model_y_ckpt', type=str, default="")
     parser.add_argument('--corruption_type', type=str, default='pixel_noise', 
                         choices=['pixel_noise', 'gaussian_blur'], 
                         help='Choose "pixel_noise" or "gaussian_blur" ')
@@ -95,21 +84,19 @@ def parse_args():
                         help='Standard deviation for Gaussian blur')
 
     # ImageNet-32 specific
-    parser.add_argument('--imagenet32_root', type=str, default='/mlspeech/data/gilad/imagenet32')
-    parser.add_argument('--subset_seed', type=int, default=42)
-    parser.add_argument(
-        '--classifier_ckpt',
-        type=str,
-        default="/home/gilad/diffusion_EM/toy_problem_implementation/"
-                "MNISTDiffusion/classifier/classifier_weights_imagenet32_100subset.pth",
-    )
+    parser.add_argument('--imagenet32_root', type=str, required=True, help='Path to the root directory of ImageNet32 dataset')
+    parser.add_argument('--subset_seed', type=int, default=42, help='Random seed used for selecting the ImageNet32 subset')
+    parser.add_argument('--classifier_ckpt', type=str, required=True, help='Path to the pretrained ImageNet32 classifier checkpoint (.pth)')
+    parser.add_argument('--pretrained_model_y_ckpt', type=str, required=True, help='Path to the pretrained logits diffusion checkpoint (.pt)')
+    parser.add_argument('--results_dir', type=str, required=True, help='Directory where checkpoints, logs, and eval outputs will be saved')
+
 
     args = parser.parse_args()
     return args
 
 
 def main(args):
-    device = torch.device('cuda:5' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print("Using device:", device)
 
     # --- Dataloaders (ImageNet-32 100-subset) ---
@@ -127,11 +114,6 @@ def main(args):
     classifier.to(device)
     classifier.eval()
 
-    # --- Diffusion model (iterative scheme, logits y-space) ---
-    if args.pretrained_model_y_ckpt == "":
-        pretrained_ckpt = "./logits_diffusion_pretrain_imagenet32_100_guiding_noise_level_0.3/BEST_epoch_080_loss_0.104026.pt"
-    else:
-        pretrained_ckpt = args.pretrained_model_y_ckpt
 
     model = MNISTDiffusion(
         timesteps=args.timesteps,
@@ -150,7 +132,7 @@ def main(args):
         num_classes=args.num_classes,
         mode=args.mode,                    # "imagenet32"
         device=device,
-        pretrained_model_y_ckpt=pretrained_ckpt,
+        pretrained_model_y_ckpt=args.pretrained_model_y_ckpt,
         corruption_type=args.corruption_type,
         blur_sigma=args.blur_sigma
     ).to(device)
@@ -185,11 +167,7 @@ def main(args):
         model.load_state_dict(ckpt["model"])
 
     global_steps = 0
-    directory = (
-        "/home/gilad/diffusion_EM/toy_problem_implementation/"
-        "MNISTDiffusion/results_true_noising_y_cond_imagenet32_100_"
-        "iterative_diffusion_full_x_full_y_150_steps_many_steps_within_iteration_noise_0.3_try2"
-    )
+    directory = args.results_dir
     os.makedirs(directory, exist_ok=True)
 
     # -------- Pre-training: x-branch only --------

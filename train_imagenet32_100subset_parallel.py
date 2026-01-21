@@ -10,28 +10,22 @@ import os
 import argparse
 from tqdm import tqdm
 
-from classifier_imagenet32_100subset import (
+from classifiers.classifier_imagenet32_100subset import (
     ImageNet32ResNet,
     build_imagenet32_datasets,
 )
-from model_y_cond_our_working_x0_y0_true_noising_cifar100 import MNISTDiffusion
+from diffusion_models.model_parallel_100_classes import MNISTDiffusion
 
 
 # ---------- ImageNet-32 (100-class subset) dataloaders ----------
 def create_imagenet32_100_dataloaders(
     batch_size,
-    image_size=32,          # kept for interface compatibility
+    image_size=32,          
     num_workers=4,
-    root="/mlspeech/data/gilad/imagenet32",
+    root="",
     num_subset_classes=100,
     seed=42,
 ):
-    """
-    Uses the SAME subset selection + transforms as in classifier_imagenet32_100subset.py
-    via build_imagenet32_datasets, which reads NPZ files:
-      root/Imagenet32_train_npz/train_data_batch_1.npz ... _10.npz
-      root/Imagenet32_val_npz/val_data.npz
-    """
     train_dataset, test_dataset = build_imagenet32_datasets(
         root=root,
         num_subset_classes=num_subset_classes,
@@ -48,39 +42,21 @@ def create_imagenet32_100_dataloaders(
     test_dataloader = DataLoader(
         test_dataset,
         batch_size=batch_size,
-        shuffle=True,   # keep behavior similar to your CIFAR100 script
+        shuffle=True,   
         num_workers=num_workers,
         pin_memory=True,
     )
     return train_dataloader, test_dataloader
 
-
-def label_to_noisy_probabilities(labels, num_classes, correct_prob=0.99):
-    batch_size = len(labels)
-    remaining_prob = 1.0 - correct_prob
-    noise = torch.rand(batch_size, num_classes)
-    noise[range(batch_size), labels] = 0
-    noise_sum = noise.sum(dim=1, keepdim=True)
-    noise = noise / noise_sum
-    noise *= remaining_prob
-    probabilities = noise.clone()
-    probabilities[range(batch_size), labels] = correct_prob
-    return probabilities
-
-
-def label_to_one_hot(labels, num_classes):
-    return torch.nn.functional.one_hot(labels, num_classes=num_classes).float()
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Training MNISTDiffusion for ImageNet-32 (100-class subset)")
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--epochs', type=int, default=400)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--ckpt', type=str, help='define checkpoint path', default='')
     parser.add_argument('--n_samples', type=int, help='define sampling amounts after every epoch trained', default=36)
     parser.add_argument('--model_base_dim', type=int, help='base dim of Unet', default=64)
-    parser.add_argument('--timesteps', type=int, help='sampling steps of DDPM', default=500) # was 150
+    parser.add_argument('--timesteps', type=int, help='sampling steps of DDPM', default=150) 
     parser.add_argument('--model_ema_steps', type=int, help='ema model evaluation interval', default=10)
     parser.add_argument('--model_ema_decay', type=float, help='ema model decay', default=0.995)
     parser.add_argument('--log_freq', type=int, help='training log message printing frequency', default=10)
@@ -91,29 +67,28 @@ def parse_args():
     parser.add_argument('--iter_per_epoch', type=int, default=5)
     parser.add_argument('--guiding_noise_level', type=float, default=0.15)
     parser.add_argument('--y_loss_importance', type=float, default=0.1)
-    parser.add_argument('--is_ddim', type=bool, default=False) # was True
+    parser.add_argument('--is_ddim', type=bool, default=True) 
     parser.add_argument('--num_classes', type=int, default=100)
     parser.add_argument('--mode', type=str, default="imagenet32")
 
     # ImageNet-32 specific
-    parser.add_argument('--imagenet32_root', type=str, default='/mlspeech/data/gilad/imagenet32')
-    parser.add_argument('--subset_seed', type=int, default=42)
-    parser.add_argument('--classifier_path', type=str,
-                        default="./classifier/classifier_weights_imagenet32_100subset.pth")
-    parser.add_argument('--pretrained_model_y_ckpt', type=str,
-                        default="./logits_diffusion_pretrain_imagenet32_100_guiding_noise_level_0.15/BEST_epoch_080_loss_0.102834.pt")
+    parser.add_argument('--imagenet32_root', type=str, required=True, help='Path to the root directory of ImageNet32 dataset')
+    parser.add_argument('--subset_seed', type=int, default=42, help='Random seed used for selecting the ImageNet32 subset')
+    parser.add_argument('--classifier_path', type=str, required=True, help='Path to the pretrained image classifier checkpoint (.pth)')
+    parser.add_argument('--pretrained_model_y_ckpt', type=str, required=True, help='Path to the pretrained logits diffusion model checkpoint (.pt)')
     parser.add_argument('--corruption_type', type=str, default='pixel_noise', 
                         choices=['pixel_noise', 'gaussian_blur'], 
                         help='Choose "pixel_noise" or "gaussian_blur" (default)')
     parser.add_argument('--blur_sigma', type=float, default=2.0, 
                         help='Standard deviation for Gaussian blur')
+    parser.add_argument('--results_dir', type=str, required=True, help='Directory where evaluation results and logs will be saved')
 
     args = parser.parse_args()
     return args
 
 
 def main(args):
-    device = torch.device('cuda:7' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print("Using device:", device)
 
     # --------- Dataloaders for ImageNet-32 100-subset ---------
@@ -174,15 +149,7 @@ def main(args):
         model.load_state_dict(ckpt["model"])
 
     # --------- Results directory (ImageNet-32 specific) ---------
-    if args.is_y_cond:
-        directory = (
-            "/home/gilad/diffusion_EM/toy_problem_implementation/MNISTDiffusion/"
-            f"results_true_noising_y_cond_imagenet32_100_x_0_y_0_ddpm_{args.timesteps}_"
-            f"steps_gaussian_noise_0.15_weighted_loss_"
-            f"{args.y_loss_importance}_on_y"
-        )
-    else:
-        directory = "results_imagenet32_100"
+    directory = args.results_dir
     os.makedirs(directory, exist_ok=True)
 
     global_steps = 0

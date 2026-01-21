@@ -92,8 +92,8 @@ class ImageNet32NPZ(Dataset):
         for fname in file_list:
             print(f"Loading {fname} ...")
             entry = np.load(fname)
-            imgs = entry["data"]      # shape: (N, 3072)
-            labels = entry["labels"]  # shape: (N,)
+            imgs = entry["data"]     
+            labels = entry["labels"]  
 
             # reshape to (N, 3, 32, 32) then to (N, 32, 32, 3) for PIL/ToTensor
             imgs = imgs.reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
@@ -195,8 +195,6 @@ def build_imagenet32_datasets(root, num_subset_classes=100, seed=12345):
     old_to_new = {old: new for new, old in enumerate(subset_original_labels)}
 
     print(f"Chosen {num_subset_classes} classes (fixed seed = {seed}):")
-    # for new_id, old_id in enumerate(subset_original_labels):
-    #     print(f"{new_id:3d} <- original label {old_id}")
 
     # Wrap datasets with subset + label remap
     train_dataset = RemappedSubset(train_full, subset_original_labels, old_to_new)

@@ -12,8 +12,8 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 
 from utils import ExponentialMovingAverage
-from model_cifar10_regular import MNISTDiffusion  
-from classifier_imagenet32_100subset import (
+from diffusion_models.model_enhanced import MNISTDiffusion  
+from classifiers.classifier_imagenet32_100subset import (
     ImageNet32ResNet,
     build_imagenet32_datasets,  
 )
@@ -24,16 +24,10 @@ def create_imagenet32_100_dataloaders(
     batch_size,
     image_size=32,              # kept for interface compatibility, not used internally
     num_workers=4,
-    root="/mlspeech/data/gilad/imagenet32",
+    root="",
     num_subset_classes=100,
     seed=42,
 ):
-    """
-    Uses the SAME subset selection + transforms as in classifier_imagenet32_100subset.py
-    via build_imagenet32_datasets, which now reads NPZ files:
-      root/Imagenet32_train_npz/train_data_batch_1.npz ... _10.npz
-      root/Imagenet32_val_npz/val_data.npz
-    """
     train_dataset, test_dataset = build_imagenet32_datasets(
         root=root,
         num_subset_classes=num_subset_classes,
@@ -80,8 +74,11 @@ def parse_args():
     parser.add_argument('--blur_sigma', type=float, default=2.0, 
                         help='Standard deviation for Gaussian blur')
     # imagenet32 NPZ root / seed
-    parser.add_argument('--imagenet32_root', type=str, default='/mlspeech/data/gilad/imagenet32')
-    parser.add_argument('--subset_seed', type=int, default=42)
+    parser.add_argument('--imagenet32_root', type=str, required=True, help='Path to the root directory of ImageNet32 dataset')
+    parser.add_argument('--subset_seed', type=int, default=42, help='Random seed used for selecting the ImageNet32 subset')
+    parser.add_argument('--classifier_ckpt', type=str, required=True, help='Path to the pretrained ImageNet32 classifier checkpoint (.pth)')
+    parser.add_argument('--results_dir', type=str, required=True, help='Directory where checkpoints, logs, and eval outputs will be saved')
+
     args = parser.parse_args()
 
     return args
@@ -89,7 +86,7 @@ def parse_args():
 
 def main(args):
     # keep your device choice, adjust if needed
-    device = torch.device('cuda:6' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
     print("Using device:", device)
 
     # ----- Dataloaders: ImageNet-32 (100-class subset) -----
@@ -103,8 +100,7 @@ def main(args):
 
     # ----- Load the classifier (ImageNet-32 100-subset) -----
     classifier = ImageNet32ResNet(num_classes=100)
-    classifier_path = "./classifier/classifier_weights_imagenet32_100subset.pth"
-    classifier.load_state_dict(torch.load(classifier_path, map_location='cpu'))
+    classifier.load_state_dict(torch.load(args.classifier_ckpt, map_location='cpu'))
     classifier.to(device)
     classifier.eval()  # Set classifier to evaluation mode
 
@@ -144,7 +140,7 @@ def main(args):
         model.load_state_dict(ckpt["model"])
 
     global_steps = 0
-    results_dir = "results_imagenet32_100subset_regular_gaussian_blur_kernel_5_sigma_2"
+    results_dir = args.results_dir
     os.makedirs(results_dir, exist_ok=True)
 
     for epoch in range(args.epochs):

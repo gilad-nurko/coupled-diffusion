@@ -21,7 +21,6 @@ class MNISTDiffusion(nn.Module):
         self.mode = mode
         self.corruption_type = corruption_type
         if self.corruption_type == 'gaussian_blur':
-            # Hardcoded kernel_size=5
             self.blur_transform = GaussianBlur(kernel_size=5, sigma=blur_sigma)
 
         betas=self._cosine_variance_schedule(timesteps)
@@ -44,22 +43,23 @@ class MNISTDiffusion(nn.Module):
         self.register_buffer("data_mean", mean)
         self.register_buffer("data_std", std)
 
-        if mode=="cifar10":
-            from y_probs_model_cifar10 import ConditionalModel
-            self.model_y=ConditionalModel(n_input_channels=in_channels,num_classes=num_classes)
-        if mode=="mnist":
-            from y_probs_model import ConditionalModel
-            self.model_y=ConditionalModel(n_input_channels=in_channels,num_classes=num_classes)
+        # if mode=="cifar10":
+        #     from denoisers.y_probs_model_cifar10 import ConditionalModel
+        #     self.model_y=ConditionalModel(n_input_channels=in_channels,num_classes=num_classes)
+        # if mode=="mnist":
+        #     from denoisers.y_probs_model import ConditionalModel
+        #     self.model_y=ConditionalModel(n_input_channels=in_channels,num_classes=num_classes)
         if mode=="cifar100" or mode=="imagenet32" or mode=="imagenet32_1k":
-            if mode=="imagenet32_1k":
-                from y_probs_model_imagenet_1k import ConditionalModel
-            else:
-                from y_probs_model_cifar100 import ConditionalModel
+            # if mode=="imagenet32_1k":
+            #     from denoisers.y_probs_model_imagenet_1k import ConditionalModel
+            # else:
+            #     from denoisers.y_probs_model_cifar100 import ConditionalModel
+            from denoisers.logits_model_100_classes import ConditionalModel
             self.model_y = ConditionalModel(
                 feature_dim=512,
                 hidden_dim=1024,
-                n_input_channels=in_channels,   # 3
-                num_classes=num_classes,        # 100
+                n_input_channels=in_channels,   
+                num_classes=num_classes,        
                 timesteps=150,
                 num_heads=8,
             )
@@ -82,10 +82,11 @@ class MNISTDiffusion(nn.Module):
                 print(f"  missing keys   : {len(missing)}")
                 print(f"  unexpected keys: {len(unexpected)}")
                 
-        if mode=="imagenet32_1k":
-            from unet_y_cond_1000_classes import Unet
-        else:
-            from unet_y_cond import Unet
+        # if mode=="imagenet32_1k":
+        #     from denoisers.unet_y_cond_1000_classes import Unet
+        # else:
+        #     from denoisers.unet_y_cond import Unet
+        from denoisers.unet_logits_cond import Unet
 
         self.model_x=Unet(timesteps,time_embedding_dim,in_channels,in_channels,base_dim,dim_mults,is_cond=is_cond,is_y_cond=is_y_cond,num_classes=num_classes)
         self.classifier=classifier
@@ -120,12 +121,8 @@ class MNISTDiffusion(nn.Module):
         else:
             with torch.no_grad():
                 guiding_cond = get_guiding_cond(x)
-                classifier_input = torch.where(t[:, None, None, None] < self.timesteps*0.5, cond, guiding_cond) # changed from 0.2
+                classifier_input = torch.where(t[:, None, None, None] < self.timesteps*0.5, cond, guiding_cond) 
                 class_logits = self.classifier(classifier_input)
-                # temprature = 3.0
-                # class_logits = class_logits / temprature
-                # class_probs = torch.softmax(class_logits, dim=1)
-                # y_cond = class_probs
                 # normalize class_logits to have mean and std of LOGITS_MEAN and LOGITS_STD
                 class_mean = class_logits.mean(dim=1, keepdim=True)
                 class_std = class_logits.std(dim=1, keepdim=True)
@@ -145,61 +142,6 @@ class MNISTDiffusion(nn.Module):
             signal_0 = y_0_pred
         return pred_noise, signal_0
 
-    # @torch.no_grad()
-    # def sampling(self,n_samples,clipped_reverse_diffusion=True,device="cuda",x_cond=None):
-    #     x_t=torch.randn((n_samples,self.in_channels,self.image_size,self.image_size)).to(device)
-    #     y_t = torch.randn((n_samples, self.num_classes)).to(device)
-    #     # y_t=torch.softmax(y_t,dim=1)  # TODO:maybe remove this line
-    #     y_cond=None
-    #     with torch.no_grad():
-    #         class_logits = self.classifier(x_cond)
-    #         # temprature = 3.0
-    #         # class_logits = class_logits / temprature
-    #         # class_probs = torch.softmax(class_logits, dim=1)
-    #         # y_cond = class_probs
-    #         # normalize class_logits to have mean and std of LOGITS_MEAN and LOGITS_STD
-    #         class_mean = class_logits.mean(dim=1, keepdim=True)
-    #         class_std = class_logits.std(dim=1, keepdim=True)
-    #         class_logits = LOGITS_STD * (class_logits - class_mean) / (class_std + 1e-5) + LOGITS_MEAN
-    #         y_cond = class_logits
-            
-    #     y_image_cond=x_cond
-    #     for i in tqdm(range(self.timesteps-1,-1,-1),desc="Sampling"):
-    #         noise_x=torch.randn_like(x_t).to(device)
-    #         noise_y=torch.randn_like(y_t).to(device)
-    #         t=torch.tensor([i for _ in range(n_samples)]).to(device)
-    #         if i<self.timesteps*0.5: # rely on x_t rather then the guiding, changed from 0.5
-    #             y_image_cond=x_0_pred
-    #             with torch.no_grad():
-    #                 class_logits = self.classifier(x_0_pred)
-    #                 # temprature = 3.0
-    #                 # class_logits = class_logits / temprature
-    #                 # class_probs = torch.softmax(class_logits, dim=1)
-    #                 # y_cond = class_probs
-    #                 # normalize class_logits to have mean and std of LOGITS_MEAN and LOGITS_STD
-    #                 class_mean = class_logits.mean(dim=1, keepdim=True)
-    #                 class_std = class_logits.std(dim=1, keepdim=True)
-    #                 class_logits = LOGITS_STD * (class_logits - class_mean) / (class_std + 1e-5) + LOGITS_MEAN
-    #                 y_cond = class_logits
-
-    #         if clipped_reverse_diffusion:
-    #             y_t, y_0_pred=self._reverse_diffusion_with_clip(y_t,t,noise_y,y_image_cond,y_cond,is_x=False)
-    #             x_t, x_0_pred=self._reverse_diffusion_with_clip(x_t,t,noise_x,x_cond,y_0_pred,is_x=True)
-    #         else:
-    #             y_t, y_0_pred=self._reverse_diffusion(y_t,t,noise_y,y_image_cond,y_cond,is_x=False)
-    #             x_t, x_0_pred=self._reverse_diffusion(x_t,t,noise_x,x_cond,y_0_pred,is_x=True)
-
-    #     x_t=(x_t+1.)/2. #[-1,1] to [0,1]
-    #     x_t = self._normalize_image(x_t)  # added for cifar100
-    #     # y_t=(y_t+1.)/2. #[-1,1] to [0,1]    # TODO:maybe remove this line
-    #     # y_t=torch.softmax(y_t, dim=1)    # TODO:maybe remove this line
-
-    #     # normalize y_t to have mean and std of LOGITS_MEAN and LOGITS_STD
-    #     y_mean = y_t.mean(dim=1, keepdim=True)
-    #     y_std = y_t.std(dim=1, keepdim=True)
-    #     y_t = LOGITS_STD * (y_t - y_mean) / (y_std + 1e-5) + LOGITS_MEAN
-
-    #     return x_t,y_t
     @torch.no_grad()
     def sampling(self, n_samples, clipped_reverse_diffusion=True, device="cuda", x_cond=None, sampling_steps=None):
         x_t = torch.randn((n_samples, self.in_channels, self.image_size, self.image_size)).to(device)
@@ -372,7 +314,5 @@ class MNISTDiffusion(nn.Module):
                 
             if self.is_ddim:
                 std=0.0
-            # x_0_pred=(x_0_pred+1.)/2 #[-1,1] to [0,1]
-            # x_0_pred = torch.softmax(x_0_pred, dim=1)
             return mean+std*noise, x_0_pred
         

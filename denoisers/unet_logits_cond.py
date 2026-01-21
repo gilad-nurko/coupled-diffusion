@@ -119,55 +119,8 @@ class DecoderBlock(nn.Module):
 
         return x        
 
-# class Unet(nn.Module):
-#     '''
-#     simple unet design without attention
-#     '''
-#     def __init__(self,timesteps,time_embedding_dim,in_channels=3,out_channels=2,base_dim=32,dim_mults=[2,4,8,16]):
-#         super().__init__()
-#         assert isinstance(dim_mults,(list,tuple))
-#         assert base_dim%2==0 
-
-#         channels=self._cal_channels(base_dim,dim_mults)
-
-#         self.init_conv=ConvBnSiLu(in_channels,base_dim,3,1,1)
-#         self.time_embedding=nn.Embedding(timesteps,time_embedding_dim)
-
-#         self.encoder_blocks=nn.ModuleList([EncoderBlock(c[0],c[1],time_embedding_dim) for c in channels])
-#         self.decoder_blocks=nn.ModuleList([DecoderBlock(c[1],c[0],time_embedding_dim) for c in channels[::-1]])
-    
-#         self.mid_block=nn.Sequential(*[ResidualBottleneck(channels[-1][1],channels[-1][1]) for i in range(2)],
-#                                         ResidualBottleneck(channels[-1][1],channels[-1][1]//2))
-
-#         self.final_conv=nn.Conv2d(in_channels=channels[0][0]//2,out_channels=out_channels,kernel_size=1)
-
-#     def forward(self,x,t=None):
-#         x=self.init_conv(x)
-#         if t is not None:
-#             t=self.time_embedding(t)
-#         encoder_shortcuts=[]
-#         for encoder_block in self.encoder_blocks:
-#             x,x_shortcut=encoder_block(x,t)
-#             encoder_shortcuts.append(x_shortcut)
-#         x=self.mid_block(x)
-#         encoder_shortcuts.reverse()
-#         for decoder_block,shortcut in zip(self.decoder_blocks,encoder_shortcuts):
-#             x=decoder_block(x,shortcut,t)
-#         x=self.final_conv(x)
-
-#         return x
-
-#     def _cal_channels(self,base_dim,dim_mults):
-#         dims=[base_dim*x for x in dim_mults]
-#         dims.insert(0,base_dim)
-#         channels=[]
-#         for i in range(len(dims)-1):
-#             channels.append((dims[i],dims[i+1])) # in_channel, out_channel
-
-#         return channels
-
 class Unet(nn.Module):
-    def __init__(self, timesteps, time_embedding_dim, in_channels=3, out_channels=2, base_dim=32, dim_mults=[2, 4, 8, 16], is_cond=False):
+    def __init__(self, timesteps, time_embedding_dim, in_channels=3, out_channels=2, base_dim=32, dim_mults=[2, 4, 8, 16], is_cond=False, is_y_cond=False, num_classes=10):
         super().__init__()
         assert isinstance(dim_mults, (list, tuple))
         assert base_dim % 2 == 0
@@ -176,11 +129,13 @@ class Unet(nn.Module):
         # print(channels)
         self.init_conv = ConvBnSiLu(in_channels, base_dim, 3, 1, 1)
         self.cond_conv = ConvBnSiLu(in_channels, base_dim, 3, 1, 1)
+        self.y_cond_conv = ConvBnSiLu(num_classes, base_dim, 3, 1, 1)
 
         self.time_embedding = nn.Embedding(timesteps, time_embedding_dim)
 
         self.encoder_blocks = nn.ModuleList([EncoderBlock(c[0], c[1], time_embedding_dim) for c in channels])
         self.cond_encoder_blocks = nn.ModuleList([EncoderBlock(c[0], c[1], time_embedding_dim) for c in channels])
+        self.y_cond_encoder_blocks = nn.ModuleList([EncoderBlock(c[0], c[1], time_embedding_dim) for c in channels])
 
         self.mid_block = nn.Sequential(
             *[ResidualBottleneck(channels[-1][1], channels[-1][1]) for _ in range(2)],
@@ -190,12 +145,15 @@ class Unet(nn.Module):
             *[ResidualBottleneck(channels[-1][1], channels[-1][1]) for _ in range(2)],
             ResidualBottleneck(channels[-1][1], channels[-1][1] // 2)
         )
-        decoder_mul_size = 2 if is_cond else 1
+        self.y_cond_mid_block = nn.Sequential(
+            *[ResidualBottleneck(channels[-1][1], channels[-1][1]) for _ in range(2)],
+            ResidualBottleneck(channels[-1][1], channels[-1][1] // 2)
+        )
+        decoder_mul_size = 3 if is_cond and is_y_cond else 2 if is_cond or is_y_cond else 1
         self.decoder_blocks = nn.ModuleList([DecoderBlock(c[1] * decoder_mul_size, c[0] * decoder_mul_size, time_embedding_dim) for c in channels[::-1]])
         # print(channels)
         self.final_conv = nn.Conv2d(in_channels=(channels[0][0] * decoder_mul_size)//2, out_channels=out_channels, kernel_size=1)
 
-    # TODO: maybe change the way the condition enters
     def forward(self, x, t=None, cond=None, y_cond=None):
         x = self.init_conv(x)
 
@@ -206,19 +164,33 @@ class Unet(nn.Module):
         if cond is not None:
             cond = self.cond_conv(cond)
             cond_encoder_shortcuts = []
+        
+        if y_cond is not None:
+            # Embed class labels and expand to match input dimensions
+            bs, _, w, h = x.size()
+            y_cond = y_cond.view(bs, y_cond.size(1), 1, 1).expand(bs, y_cond.size(1), w, h)
+            y_cond = self.y_cond_conv(y_cond)
+            y_cond_encoder_shortcuts = []
 
         for i, encoder_block in enumerate(self.encoder_blocks):
             x, x_shortcut = encoder_block(x, t)
             encoder_shortcuts.append(x_shortcut)
             if cond is not None:
-                cond, cond_shortcut = self.cond_encoder_blocks[i](cond, t=None) # pay attention that not regular t
+                cond, cond_shortcut = self.cond_encoder_blocks[i](cond, t=None) 
                 cond_encoder_shortcuts.append(cond_shortcut)
+            if y_cond is not None:
+                y_cond, y_cond_shortcut = self.y_cond_encoder_blocks[i](y_cond, t=None)
+                y_cond_encoder_shortcuts.append(y_cond_shortcut)
 
         x = self.mid_block(x)
         if cond is not None:
             cond = self.cond_mid_block(cond)
             x = torch.cat([x, cond], dim=1)
             cond_encoder_shortcuts.reverse()
+        if y_cond is not None:
+            y_cond = self.y_cond_mid_block(y_cond)
+            x = torch.cat([x, y_cond], dim=1)
+            y_cond_encoder_shortcuts.reverse()
 
         encoder_shortcuts.reverse()
 
@@ -227,6 +199,9 @@ class Unet(nn.Module):
             if cond is not None:
                 cond_shortcut = cond_encoder_shortcuts[i]
                 shortcut = torch.cat([shortcut, cond_shortcut], dim=1)
+            if y_cond is not None:
+                y_cond_shortcut = y_cond_encoder_shortcuts[i]
+                shortcut = torch.cat([shortcut, y_cond_shortcut], dim=1)
             x = decoder_block(x, shortcut, t)
 
         x = self.final_conv(x)
@@ -234,12 +209,9 @@ class Unet(nn.Module):
         return x
 
     def _cal_channels(self, base_dim, dim_mults):
-        # print(f'dim_mults:{dim_mults}')
         dims = [base_dim * x for x in dim_mults]
         dims.insert(0, base_dim)
-        # print(f'dims:{dims}')
         channels = [(dims[i], dims[i + 1]) for i in range(len(dims) - 1)]
-        # print(f'channels{channels}')
         return channels
 
 
