@@ -36,38 +36,6 @@ def load_transcripts_words(transcripts_path: str):
         words.update(tokens)
     return sorted(words)
 
-# def build_allowed_token_id_set_with_tok(words, tok):
-#     """
-#     Build allowed token IDs using the SAME tokenizer instance used for decoding.
-#     `words` is a list of lowercase surface forms ('you're' kept as one).
-#     """
-#     allowed = set()
-
-#     # (a) allow control tokens
-#     allowed.update(tok.sot_sequence_including_notimestamps)
-#     allowed.add(tok.eot)
-
-#     # (b) robust whitespace & separators
-#     # Whisper BPE has multiple ways to emit spaces; add several encodings.
-#     for s in [" ", "  ", "\n", "\n\n", "\t"]:
-#         allowed.update(tok.encode(s))
-
-#     # (c) punctuation you want to allow
-#     for punct in [".", ",", "!", "?", "'", '"', ":", ";", "-", "—", "…"]:
-#         for s in [punct, " " + punct]:
-#             allowed.update(tok.encode(s))
-
-#     # (d) tokens for all words *as they occur in running text* (leading space)
-#     for w in words:
-#         allowed.update(tok.encode(" " + w))
-
-#     # (e) safety: also allow the join of all words in typical sentence context
-#     # to capture any subword splits we didn’t get above
-#     corpus = " " + " ".join(words)
-#     allowed.update(tok.encode(corpus))
-
-#     return sorted(allowed)
-
 def build_allowed_token_id_set_with_tok(transcripts_path, tok):
     """
     Return a sorted list of token IDs that are globally allowed at any step.
@@ -122,7 +90,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         parser.add_argument("--lr", type=float, default=1e-6, help="The learning rate (1e-4 by default)")
         parser.add_argument("--ema_decay", type=float, default=0.999, help="The parameter EMA decay constant (0.999 by default)")
         parser.add_argument("--t_eps", type=float, default=0.03, help="The minimum process time (0.03 by default)")
-        parser.add_argument("--num_eval_files", type=int, default=-1, # was 20
+        parser.add_argument("--num_eval_files", type=int, default=-1, 
                             help="Number of files for speech enhancement performance evaluation during training. Pass 0 to turn off (no checkpoints based on evaluation metrics will be generated).")
         parser.add_argument("--loss_type", type=str, default="score_matching", help="The type of loss function to use.")
         parser.add_argument("--loss_weighting", type=str, default="sigma^2", help="The weighting of the loss function.")
@@ -143,7 +111,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         loss_weighting='sigma^2', network_scaling=None, c_in='1', c_out='1', c_skip='0', sigma_data=0.1, 
         l1_weight=0.001, pesq_weight=0.0, sr=16000, data_module_cls=None, whisper_lang='en', model_mode="regular",
         whisper_name="base", guidance_scale=1.0, distillation_weight=1.0, debug=False,
-        transcripts_path: str = "/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json", **kwargs
+        transcripts_path: str = "", **kwargs
     ):
         """
         Create a new ScoreModel.
@@ -284,9 +252,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             m_tf = masks.to(x.device, dtype=losses.dtype).expand(-1, 1, x.shape[2], -1).contiguous()
 
             B = x.size(0)
-            # num = 0.5 * (losses * m_tf).sum(dim=(1, 2, 3))
-            # den = m_tf.sum(dim=(1, 2, 3)).clamp_min(1.0)
-            # loss = (num / den).mean()
             loss = 0.5 * (losses * m_tf).sum(dim=(1, 2, 3)).mean()
 
         elif self.loss_type == "denoiser":
@@ -381,8 +346,8 @@ class WhisperGuidedScoreModel(pl.LightningModule):
 
             # -------------------- metrics containers --------------------
             pesq_sum = 0; pesq_cnt = 0; si_sdr_sum = 0; estoi_sum = 0
-            o_list, l_list = [], []                 # enhanced vs gt
-            o_list_clean, o_list_corrupted = [], [] # clean/noisy vs gt
+            o_list = []                             # enhanced 
+            o_list_clean, o_list_corrupted = [], [] # clean/noisy 
             debug_seen_per_label = defaultdict(int)
 
             # -------------------- decode helpers ------------------------
@@ -390,7 +355,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             tok = self.multilingual_tokenizer
             n_vocab = tok.encoding.n_vocab
 
-            # self.allowed_toks may be a Python list; turn into a device tensor once
             allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=device)
 
             # a mask we will add to logits each step: allowed=0, disallowed=-inf
@@ -401,70 +365,12 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             # maximum tokens we’ll allow to emit (you can expose this as a hyperparam)
             max_decode_len = 224
 
-            # def decode_unconstrained(signal_16k):
-            #     """
-            #     Stock Whisper greedy decode (no vocab masking / penalties).
-            #     Returns (text, mel).
-            #     """
-            #     device = next(self.whisper.parameters()).device
-            #     wav = torch.tensor(signal_16k, dtype=torch.float32, device=device)
-            #     wav = self._pad_or_trim(wav)                  # keep your 30s framing
-            #     mel = self._log_mel_spectrogram(wav)          # keep your frontend for apples-to-apples
-
-            #     # dtype/device the way whisper.decode expects
-            #     use_fp16 = next(self.whisper.parameters()).dtype == torch.float16
-            #     mel = mel.to(device=device, dtype=torch.float16 if use_fp16 else torch.float32)
-
-            #     # Reuse your existing options (language, no timestamps, etc.)
-            #     result = whisper.decode(self.whisper, mel, self.options)
-            #     return result.text, mel
-
-            # def decode_constrained(signal_16k):
-            #     """
-            #     Greedy, closed-set decode: at each step, mask logits to allowed set.
-            #     Returns (pred_text, mel) where pred_text is the decoded string.
-            #     """
-            #     # to device
-            #     wav = torch.tensor(signal_16k, dtype=torch.float32, device=device)
-            #     wav = self._pad_or_trim(wav)  # (T,)
-            #     mel = self._log_mel_spectrogram(wav)  # (80, Tm)
-            #     feats = self.whisper.encoder(mel.unsqueeze(0))  # (1, C, T')
-
-            #     # start with SOT + <|notimestamps|>
-            #     prefix = torch.tensor([tok.sot_sequence_including_notimestamps],
-            #                         dtype=torch.long, device=device)  # (1, L0)
-            #     out = prefix.clone()
-
-            #     for _ in range(max_decode_len):
-            #         # logits over full vocab for each position so far
-            #         logits = self.whisper.decoder(out, feats).squeeze(0)  # (L, V)
-            #         next_logits = logits[-1]  # (V,)
-
-            #         # apply closed-set mask
-            #         next_logits = next_logits + base_mask
-
-            #         # greedy pick
-            #         next_id = int(torch.argmax(next_logits).item())
-            #         out = torch.cat([out, torch.tensor([[next_id]], device=device)], dim=1)
-
-            #         if next_id == tok.eot:
-            #             break
-
-            #     # strip the SOT sequence and optional trailing EOT for text
-            #     gen = out[0].tolist()
-            #     start = len(tok.sot_sequence_including_notimestamps)
-            #     if len(gen) > 0 and gen[-1] == tok.eot:
-            #         gen = gen[:-1]
-            #     text = tok.decode(gen[start:])
-            #     return text, mel
-
             def decode_constrained(signal_16k):
                 """
                 Greedy, closed-set decode: at each step, mask logits to allowed set.
                 Returns (pred_text, mel) where pred_text is the decoded string.
                 """
 
-                # to device
                 wav = torch.tensor(signal_16k, dtype=torch.float32, device=device)
                 wav = self._pad_or_trim(wav)  # (T,)
                 mel = self._log_mel_spectrogram(wav).unsqueeze(0)  # (1, 80, Tm)
@@ -528,13 +434,10 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 # # ground truth sentence
                 stem = os.path.splitext(os.path.basename(clean_file))[0]
                 category = parse_category_from_stem(stem)
-                # ground_truth = self.transcripts[category]
 
                 # closed-set ASR on noisy and clean
                 corrupted_transcript, corrupted_mel = decode_constrained(y_16k)
                 clean_transcript, clean_mel = decode_constrained(x_16k)
-                # corrupted_transcript_unconstrained, corrupted_mel = decode_unconstrained(y_16k)
-                # clean_transcript_unconstrained, clean_mel = decode_unconstrained(x_16k)
 
                 # Enhance the noisy speech (keep native sr for enhancement)
                 y_tensor = torch.tensor(y, dtype=torch.float32, device=device)
@@ -548,9 +451,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
 
                 # closed-set ASR on enhanced
                 enhanced_transcript, enhanced_mel = decode_constrained(x_hat_16k)
-                # enhanced_transcript_unconstrained, enhanced_mel = decode_unconstrained(x_hat_16k)
                 enhanced_transcript_processed = expand_contractions(self.text_normalizer(enhanced_transcript))
-                # ground_truth_processed = expand_contractions(self.text_normalizer(ground_truth))
                 corrupted_transcript_processed = expand_contractions(self.text_normalizer(corrupted_transcript))
                 clean_transcript_processed = expand_contractions(self.text_normalizer(clean_transcript))
 
@@ -558,11 +459,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 o_list.append(enhanced_transcript_processed)
                 o_list_corrupted.append(corrupted_transcript_processed)
                 o_list_clean.append(clean_transcript_processed)
-                # l_list.append(ground_truth_processed)
-
-                # wer_clean_    = self.wer_metric(clean_transcript_processed, ground_truth_processed)
-                # wer_enhanced_  = self.wer_metric(enhanced_transcript_processed, clean_transcript_processed)
-                # wer_corrupted_ = self.wer_metric(corrupted_transcript_processed, clean_transcript_processed)
 
                 # --- signal metrics ---
                 try:
@@ -592,7 +488,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             # -------------------- aggregate + log ------------------------
             si_sdr_avg = si_sdr_sum / len(clean_files)
             estoi_avg = estoi_sum / len(clean_files)
-            # wer_clean     = self.wer_metric(o_list_clean, l_list)
             wer_enhanced  = self.wer_metric(o_list, o_list_clean)
             wer_corrupted = self.wer_metric(o_list_corrupted, o_list_clean)
 
@@ -600,7 +495,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             self.log('si_sdr', si_sdr_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('estoi',  estoi_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_enhanced',  wer_enhanced,  on_step=False, on_epoch=True, sync_dist=True)
-            # self.log('wer_clean',     wer_clean,     on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_corrupted', wer_corrupted, on_step=False, on_epoch=True, sync_dist=True)
 
         # keep your training loss path unchanged
@@ -837,12 +731,12 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             mel_scale="slaney",
         ).to(power.device) 
 
-        if fb.shape[0] != n_mels:      # old torchaudio → transpose
+        if fb.shape[0] != n_mels:    
             fb = fb.t().contiguous()
 
         mel = fb @ power
         mel = mel[:, :-1]
-        log_mel = torch.log10(torch.clamp(mel, min=1e-10))  # +2 to match Whisper’s global shift
+        log_mel = torch.log10(torch.clamp(mel, min=1e-10))  
         log_mel = torch.maximum(log_mel, log_mel.max() - 8.0)
         log_mel = (log_mel + 4.0) / 4.0
         return log_mel
@@ -896,7 +790,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         import os
         
         # Create debug directory if it doesn't exist
-        debug_dir = "debug_plots/N=50_snr=0.33"
+        debug_dir = "debug_plots"
         os.makedirs(debug_dir, exist_ok=True)
         
         # Plot mel spectrograms

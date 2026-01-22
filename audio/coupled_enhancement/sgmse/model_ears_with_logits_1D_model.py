@@ -15,12 +15,9 @@ import whisper
 import os, re
 import torch.nn.functional as F
 import torchaudio
-from typing import List, Tuple, Optional
-from tqdm import tqdm
 from sgmse import sampling
 from sgmse.sdes import SDERegistry
 from sgmse.backbones import BackboneRegistry
-from sgmse.util.inference import evaluate_model
 from sgmse.util.other import pad_spec, si_sdr, build_allowed_token_id_set_with_tok, normalize_logits, parse_category_from_stem
 from pesq import pesq
 from pystoi import stoi
@@ -36,7 +33,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         parser.add_argument("--lr", type=float, default=1e-6, help="The learning rate (1e-4 by default)")
         parser.add_argument("--ema_decay", type=float, default=0.999, help="The parameter EMA decay constant (0.999 by default)")
         parser.add_argument("--t_eps", type=float, default=0.03, help="The minimum process time (0.03 by default)")
-        parser.add_argument("--num_eval_files", type=int, default=-1, # was 20
+        parser.add_argument("--num_eval_files", type=int, default=-1, 
                             help="Number of files for speech enhancement performance evaluation during training. Pass 0 to turn off (no checkpoints based on evaluation metrics will be generated).")
         parser.add_argument("--loss_type", type=str, default="score_matching", help="The type of loss function to use.")
         parser.add_argument("--loss_weighting", type=str, default="sigma^2", help="The weighting of the loss function.")
@@ -64,8 +61,8 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         loss_weighting='sigma^2', network_scaling=None, c_in='1', c_out='1', c_skip='0', sigma_data=0.1, 
         l1_weight=0.001, pesq_weight=0.0, sr=16000, data_module_cls=None, whisper_lang='en', model_mode="regular",
         whisper_name="base", guidance_scale=1.0, distillation_weight=1.0, logits_weight=1.0, sampling_mode="full", 
-        num_iterations=5, logits_diffusion_steps=5, debug=False, transcripts_path: str = "/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json",
-        logits_pretrain_ckpt: str="/mlspeech/data/gilad/logs/ASR_diffusion_ears/with_logits/logits_model_pretrain.pt", **kwargs
+        num_iterations=5, logits_diffusion_steps=5, debug=False, transcripts_path: str = "",
+        logits_pretrain_ckpt: str="", **kwargs
     ):
         """
         Create a new ScoreModel.
@@ -142,8 +139,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         )
         self.ema_decay = ema_decay
         self.ema = ExponentialMovingAverage(self.parameters(), decay=self.ema_decay)
-        # # Initialize EMA with current parameter values
-        # self._initialize_ema()
     
     def _initialize_ema(self):
         """Initialize EMA with current parameter values (including logits_model, which will be random)."""
@@ -205,7 +200,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
 
         # -------------------- tokenizer / vocab --------------------
         tok = self.multilingual_tokenizer
-        n_vocab = tok.encoding.n_vocab
 
         # Allowed token ids tensor (closed set)
         allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=whisper_dev)
@@ -334,203 +328,8 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         ar = torch.arange(S, device=whisper_dev).unsqueeze(0)  # [1, S]
         mask = ar < constr_len.unsqueeze(1)                    # [B, S] boolean
 
-        # # -------------------- (6) decode constrained transcripts --------------------
-        # transcripts = []
-        # for b in range(B):
-        #     toks = constrained_tokens[b]
-        #     if toks and toks[-1] == tok.eot:
-        #         toks = toks[:-1]
-        #     transcripts.append(tok.decode(toks))
-
         return mel, allowed_logits, mask, audio_embedding#, transcripts
-    
-    # def extract_logits(self, y, lengths):
-    #     """
-    #     Greedy, closed-set decode for a batch.
-    #     Returns (mel[B,80,Tm], allowed_logits[B,S,|A|]).
-    #     """
-    #     whisper_dev = next(self.whisper.parameters()).device
-    #     self.whisper.eval()
-    #     # -------------------- decode helpers ------------------------
-    #     tok = self.multilingual_tokenizer
-    #     n_vocab = tok.encoding.n_vocab
-
-    #     # self.allowed_toks may be a Python list; turn into a device tensor once
-    #     allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=whisper_dev)
-
-    #     # a mask we will add to logits each step: allowed=0, disallowed=-inf
-    #     neg_inf = -1e9
-    #     base_mask = torch.full((n_vocab,), neg_inf, device=whisper_dev)
-    #     base_mask[allowed_ids_t] = 0.0
-
-    #     # maximum tokens we’ll allow to emit (you can expose this as a hyperparam)
-    #     max_decode_len = 224
-    #     B = y.shape[0]
-
-    #     # --------- (1) build batch of 16k audios as you already do ----------
-    #     y_audio_list_padded = []
-    #     true_audio_lengths_16k = []
-    #     for i in range(B):
-    #         spec_single = y[i].squeeze(0)  # (F, T)
-    #         audio_single = self.to_audio(spec_single, lengths[i].item()).to(dtype=torch.float32)
-    #         if self.sr != 16000:
-    #             audio_single_16k = ta_resample(audio_single.unsqueeze(0), self.sr, 16000).squeeze(0).to(whisper_dev)
-    #         else:
-    #             audio_single_16k = audio_single.to(whisper_dev)
-    #         true_audio_lengths_16k.append(int(audio_single_16k.shape[-1]))
-    #         y_audio_list_padded.append(self._pad_or_trim(audio_single_16k))
-
-    #     # (B, T_audio) on Whisper device
-    #     y_audio_padded = torch.stack(y_audio_list_padded, dim=0).to(whisper_dev)
-
-    #     # --------- (2) batched mel + encoder ----------
-    #     mel = self._log_mel_spectrogram(y_audio_padded)           # (B, 80, Tm) on whisper_dev
-    #     feats = self.whisper.encoder(mel)                          # (B, Tenc, D)
-
-    #     hop = getattr(self, "mel_hop_length", 160)                 # Whisper default hop
-    #     pad_target_len = y_audio_padded.shape[-1]                  # in samples @16k
-
-    #     true_audio_lengths_16k = [min(L, pad_target_len) for L in true_audio_lengths_16k]   # cap if _pad_or_trim truncated
-    #     true_mel_lengths  = [(L + hop - 1) // hop for L in true_audio_lengths_16k]         # ceil(L/hop)
-
-    #     enc_down = 4  # Whisper conv front-end downsamples time by 2*2
-    #     true_enc_lengths = [(m + enc_down - 1) // enc_down for m in true_mel_lengths]      # ceil(m/4)
-    #     max_true_enc = max(true_enc_lengths)
-
-    #     # --- NEW: slice encoder output to the longest real time step only ---
-    #     audio_embedding = feats[:, :max_true_enc, :]   # (B, max_true_enc, C)
-
-    #     # --------- (3) init tokens (batched) ----------
-    #     prefix_1 = torch.tensor([tok.sot_sequence_including_notimestamps],
-    #                             dtype=torch.long, device=whisper_dev)  # (1, Lp)
-    #     out = prefix_1.repeat(B, 1)                                    # (B, Lp)
-
-    #     # tracking finished sequences
-    #     active = torch.ones(B, dtype=torch.bool, device=whisper_dev)
-    #     step_logits = []  # each item: (B, |A|)
-    #     first_eot_step = torch.full((B,), -1, dtype=torch.long, device=whisper_dev)
-    #     match = (allowed_ids_t == tok.eot).nonzero(as_tuple=True)[0]
-    #     if match.numel() == 0:
-    #         raise ValueError("tok.eot is not in allowed_ids_t; cannot write 1-hot for finished rows.")
-    #     eot_pos_in_allowed = int(match.item())
-    #     # --------- (4) autoregressive loop (batched) ----------
-    #     for s in range(max_decode_len):
-    #         # logits over vocab for each position so far
-    #         logits_full = self.whisper.decoder(out, feats)  # (B, cur_len, V)
-    #         next_logits_full = logits_full[:, -1, :]        # (B, V)
-    #         # allowed_next = torch.softmax(next_logits_full[:, allowed_ids_t], dim=-1)  # (B, |A|)
-    #         allowed_next = normalize_logits(next_logits_full[:, allowed_ids_t], audio=y.to(next_logits_full.device))  # (B, |A|)
-
-    #         # Overwrite finished rows with one-hot (1 at EOT, 0 elsewhere)
-    #         if not active.all():
-    #             # Create a zeros tensor matching dtype/device
-    #             one_hot_finished = allowed_next.new_zeros((allowed_next.size(0), allowed_next.size(1)))
-    #             # Set EOT position to 1 for finished rows
-    #             one_hot_finished[~active, eot_pos_in_allowed] = 1.0
-    #             # For active rows keep real values; for finished rows use 1-hot
-    #             # Expand active to (B, 1) for broadcasting
-    #             mask_active = active.unsqueeze(1)
-    #             allowed_next = torch.where(mask_active, allowed_next, one_hot_finished)
-
-    #         step_logits.append(allowed_next)
-
-    #         # apply closed-set mask (broadcast base_mask[V] over batch)
-    #         masked = next_logits_full + base_mask  # (B, V)
-
-    #         # force already-finished rows to keep emitting EOT
-    #         if not active.all():
-    #             masked = masked.clone()
-    #             masked[~active] = neg_inf
-    #             masked[~active, tok.eot] = 1e9  # guarantee EOT wins
-
-    #         # greedy pick per row
-    #         next_ids = torch.argmax(masked, dim=1)  # (B,)
-
-    #         # append to tokens
-    #         out = torch.cat([out, next_ids.unsqueeze(1)], dim=1)  # (B, cur_len+1)
-
-    #         # update finished mask
-    #         newly_finished = (next_ids == tok.eot) & active
-    #         if newly_finished.any():                    
-    #             first_eot_step[newly_finished] = s
-    #         active = active & (~newly_finished)
-
-    #         if not active.any():
-    #             break
-
-    #     # stack allowed logits to [B, S, |A|]
-    #     allowed_logits = torch.stack(step_logits, dim=0).permute(1, 0, 2).contiguous()
-    #     S = allowed_logits.shape[1]
-    #     valid_lengths = torch.where(
-    #         first_eot_step >= 0,
-    #         first_eot_step + 1,                     # include the EOT step itself
-    #         torch.as_tensor(S, device=whisper_dev)  # if no EOT emitted
-    #     )
-    #     ar = torch.arange(S, device=whisper_dev).unsqueeze(0)  # [1,S]
-    #     mask = ar < valid_lengths.unsqueeze(1)                 # [B,S] boolean
-    #     return mel, allowed_logits, mask, audio_embedding
-    
-    
-    # def pad_align_logits_with_eot(self,
-    #     clean_logits: torch.Tensor,  # [B, S1, C]
-    #     clean_mask:   torch.Tensor,  # [B, S1]  (bool: True=real step, False=pad)
-    #     noisy_logits: torch.Tensor,  # [B, S2, C]
-    #     noisy_mask:   torch.Tensor,  # [B, S2]  (bool)
-    # ):
-    #     """
-    #     Pads the *shorter* sequence (per batch *uniformly* to the global max S)
-    #     with a 1-hot vector at the EOT index. Adjusts masks accordingly.
-    #     Returns:
-    #     clean_logits_p, clean_mask_p, noisy_logits_p, noisy_mask_p, union_mask
-    #     Shapes after: [B, S_max, C] for logits, [B, S_max] for masks.
-    #     """
-    #     device = clean_logits.device
-    #     dtype  = clean_logits.dtype
-    #     tok = self.multilingual_tokenizer
-    #     allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=device)
-    #     B, S1, C = clean_logits.shape
-    #     _, S2, C2 = noisy_logits.shape
-    #     assert C == C2, f"Channel (|A|) mismatch: clean C={C}, noisy C={C2}"
-
-    #     # ----- find EOT index inside allowed ids -----
-    #     match = (allowed_ids_t == tok.eot).nonzero(as_tuple=True)[0]
-    #     if match.numel() == 0:
-    #         raise ValueError("tok.eot is not in allowed_ids_t; cannot write 1-hot for padded rows.")
-    #     eot_pos_in_allowed = int(match.item())
-
-    #     # 1-hot vector at EOT for padding rows
-    #     eot_onehot = torch.zeros(C, device=device, dtype=dtype)
-    #     eot_onehot[eot_pos_in_allowed] = 1.0  # you can choose another pad value if you prefer
-
-    #     S_max = max(S1, S2)
-    #     if S_max == S1 == S2:
-    #         # No padding needed; still provide union mask
-    #         union_mask = clean_mask | noisy_mask
-    #         return clean_logits, noisy_logits, union_mask
-
-    #     # ----- pad CLEAN up to S_max -----
-    #     if S1 < S_max:
-    #         pad_steps = S_max - S1
-    #         pad_logits_clean = eot_onehot.view(1, 1, C).expand(B, pad_steps, C)
-    #         clean_logits = torch.cat([clean_logits, pad_logits_clean], dim=1)
-    #         clean_mask   = torch.cat([clean_mask, torch.zeros(B, pad_steps, dtype=torch.bool, device=device)], dim=1)
-    #     else:
-    #         # already S_max; ensure mask shape is consistent
-    #         assert clean_logits.shape[1] == S_max and clean_mask.shape[1] == S_max
-
-    #     # ----- pad NOISY up to S_max -----
-    #     if S2 < S_max:
-    #         pad_steps = S_max - S2
-    #         pad_logits_noisy = eot_onehot.view(1, 1, C).expand(B, pad_steps, C)
-    #         noisy_logits = torch.cat([noisy_logits, pad_logits_noisy], dim=1)
-    #         noisy_mask   = torch.cat([noisy_mask, torch.zeros(B, pad_steps, dtype=torch.bool, device=device)], dim=1)
-    #     else:
-    #         assert noisy_logits.shape[1] == S_max and noisy_mask.shape[1] == S_max
-
-    #     # ----- combined mask (requested): clean_mask OR noisy_mask -----
-    #     union_mask = clean_mask | noisy_mask
-
-    #     return clean_logits, noisy_logits, union_mask
+  
     def pad_align_logits_with_eot(self,
             clean_logits: torch.Tensor,  # [B, S1, C]
             clean_mask:   torch.Tensor,  # [B, S1]
@@ -616,67 +415,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         union_mask = clean_mask | noisy_mask  # now both [B, S_max]
 
         return clean_logits, clean_mask, noisy_logits, noisy_mask, union_mask
-
-
-    # def _load_pretrained_logits_if_available(self) -> bool:
-    #     """Returns True if loaded successfully (and pretraining can be skipped)."""
-    #     path = self.logits_pretrain_ckpt
-    #     if not path:
-    #         return False
-    #     if not os.path.exists(path):
-    #         return False
-    #     try:
-    #         ckpt = torch.load(path, map_location="cpu")
-    #         state = ckpt.get("state_dict", ckpt)
-            
-    #         # Strip the "logits_model." prefix if it exists (PyTorch Lightning format)
-    #         prefix = "logits_model."
-    #         filtered_state = {}
-    #         for key, value in state.items():
-    #             if key.startswith(prefix):
-    #                 new_key = key[len(prefix):]  # Remove prefix
-    #                 filtered_state[new_key] = value
-    #             else:
-    #                 filtered_state[key] = value
-            
-    #         # Load with strict=False
-    #         missing_keys, unexpected_keys = self.logits_model.load_state_dict(filtered_state, strict=False)
-            
-    #         print(f"[logits pretrain] Successfully loaded {len(filtered_state) - len(unexpected_keys)} parameters from {path}")
-            
-    #         if missing_keys:
-    #             print(f"[logits pretrain] Missing keys ({len(missing_keys)}): {missing_keys[:5]}...")  # Show first 5
-    #         if unexpected_keys:
-    #             print(f"[logits pretrain] Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:5]}...")  # Show first 5
-                
-    #         return True
-    #     except Exception as e:
-    #         print(f"[logits pretrain] Failed to load {path}: {e}")
-    #         return False
-    
-    # def load_logits_denoiser_from_pl_ckpt(model, ckpt_path, prefix="logits_model."):
-    #     ckpt = torch.load(ckpt_path, map_location="cpu")
-
-    #     # Lightning usually stores under "state_dict"; fall back to raw dict if needed
-    #     state_dict = ckpt.get("state_dict", ckpt)
-
-    #     # Filter only logits_model.* and strip the prefix
-    #     filtered = {}
-    #     for k, v in state_dict.items():
-    #         if k.startswith(prefix):
-    #             new_k = k[len(prefix):]  # drop "logits_model."
-    #             filtered[new_k] = v
-
-    #     # Try loading
-    #     missing, unexpected = model.load_state_dict(filtered, strict=False)
-
-    #     print(f"[logits pretrain] loaded {len(filtered)} tensors into LogitsDenoiser "
-    #         f"(missing={len(missing)}, unexpected={len(unexpected)})")
-    #     if missing:
-    #         print("  missing:", missing[:10], "..." if len(missing) > 10 else "")
-    #     if unexpected:
-    #         print("  unexpected:", unexpected[:10], "..." if len(unexpected) > 10 else "")
-    #     return model
     
     def on_fit_start(self):
         super().on_fit_start()
@@ -714,225 +452,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             if self.global_rank == 0:
                 print(f"[logits pretrain] FAILED to load {path}: {e}")
 
-
-    # def on_fit_start(self):
-    #     # If already trained & cached → just load & return
-    #     if self._load_pretrained_logits_if_available():
-    #         if self.trainer.is_global_zero:
-    #             print("[logits pretrain] Loaded cached logits_model; skipping warmup.")
-    #         if self.trainer.strategy is not None:
-    #             self.trainer.strategy.barrier()
-    #         return
-
-    #     # If rank>0, let rank 0 try to pretrain. Others wait, then load.
-    #     if not self.trainer.is_global_zero:
-    #         if self.trainer.strategy is not None:
-    #             self.trainer.strategy.barrier()
-    #         if self._load_pretrained_logits_if_available():
-    #             return
-    #         return
-
-    #     # ---------- Rank 0: run the one-time warmup ----------
-    #     epochs = 40  # number of warmup epochs
-    #     print(f"[logits pretrain] Starting warmup for {epochs} epochs…")
-    #     logits_optimizer = torch.optim.Adam(self.logits_model.parameters(), lr=self.lr)
-    #     model_dev = next(self.logits_model.parameters()).device
-    #     best_loss = float("inf")   
-    #     best_state = None
-    #     best_epoch = -1
-
-    #     for epoch in tqdm(range(epochs)):
-    #         epoch_losses = []
-    #         for batch in tqdm(self.data_module.train_dataloader()):
-    #             specs, lengths = (batch["specs"], batch["lengths_samples"])
-    #             y = specs[:, 0:1]  # (B, 1, F, T)
-    #             x = specs[:, 1:2]  # (B, 1, F, T)
-
-    #             # sample a single t per item in the (audio) batch, then broadcast across S
-    #             t_b = torch.rand(x.shape[0], device=x.device) * (self.sde.T - self.t_eps) + self.t_eps
-    #             t_b = t_b.to(model_dev)  # shape [B]
-
-    #             # ----- get clean/noisy logits: shapes [B, S, |A|] -----
-    #             _, clean_logits, clean_mask, clean_audio_embedding = self.extract_logits(x, lengths)   # [B, S, C]
-    #             _, noisy_logits, noisy_mask, noisy_audio_embedding = self.extract_logits(y, lengths)   # [B, S, C]
-    #             noisy_logits = dtw_align_batch(clean_logits, noisy_logits)[0]
-    #             clean_logits = clean_logits.to(model_dev)
-    #             noisy_logits = noisy_logits.to(model_dev)
-    #             mask = clean_mask.to(model_dev)                 # [B, S] boolean
-    #             mask_flat = mask.reshape(B * S)                 # [B*S]
-    #             B, S, C = clean_logits.shape
-
-    #             # ---- diffuse per-step (but do it in parallel) ----
-    #             # Your SDE.marginal_prob expects an extra trailing dim; keep that trick.
-    #             noise = torch.randn_like(clean_logits)                           # [B, S, C]
-    #             clean_logits_4d = clean_logits[..., None]                        # [B, S, C, 1]
-    #             noisy_logits_4d = noisy_logits[..., None]                        # [B, S, C, 1]
-    #             # Broadcast t over S: [B] -> [B, S]
-    #             t_bs = t_b[:, None].expand(B, S).contiguous()                    # [B, S]
-    #             # Some SDE impls accept vector t; compute mean/std stepwise by flattening t as needed
-    #             mean_l, std_l = self.sde.marginal_prob(clean_logits_4d, noisy_logits_4d, t_bs)  # returns [B,S,C,1] mean, [B,S] std
-    #             mean_l = mean_l.squeeze(-1)                                      # [B, S, C]
-    #             x_t_l = mean_l + std_l[:, :, None] * noise                       # [B, S, C]
-
-    #             # ---- PER-STEP MODEL CALL: flatten S into batch ----
-    #             x_t_flat     = x_t_l.reshape(B * S, C)        # [B*S, C]
-    #             noisy_flat   = noisy_logits.reshape(B * S, C) # [B*S, C]
-    #             t_flat       = t_bs.reshape(B * S)            # [B*S]
-
-    #             logits_optimizer.zero_grad()
-
-    #             # Your model API is assumed to be (x_t_step, cond_step, t_step) -> score_step with shape [B*S, C]
-    #             predicted_score = self.logits_model(x_t_flat, noisy_flat, t_flat)  # [B*S, C]
-
-    #             # ---- loss: same score-matching form, but per-step ----
-    #             sigma_flat = self.sde._std(t_flat)[:, None].to(model_dev)          # [B*S, 1]
-    #             resid_flat = predicted_score * sigma_flat + noise.reshape(B * S, C)
-    #             resid_flat = resid_flat[mask_flat]  # mask out padded frames
-    #             # mean over all B*S items; sum over channels
-    #             loss = 0.5 * resid_flat.pow(2).sum(-1).mean()
-
-    #             loss.backward()
-    #             logits_optimizer.step()
-    #             epoch_losses.append(loss.detach().cpu())
-
-    #         avg_loss = torch.stack(epoch_losses).mean()
-    #         self.logger.experiment.log({"logits_pretrain_loss": avg_loss.item()})
-
-    #         if avg_loss.item() < best_loss:
-    #             best_loss = avg_loss.item()
-    #             best_epoch = int(epoch + 1)
-    #             best_state = {
-    #                 "state_dict": self.logits_model.state_dict(),
-    #                 "meta": {
-    #                     "best_epoch": int(epoch + 1),
-    #                     "best_loss": float(best_loss),
-    #                     "allowed_toks_len": int(len(self.allowed_toks)),
-    #                 },
-    #             }
-    #             torch.save(best_state, self.logits_pretrain_ckpt)
-    #             print(f"[logits pretrain] New best model saved at epoch {epoch+1} (loss={best_loss:.6f})")
-
-    #     # best checkpoint was already saved inside the epoch loop
-    #     print(f"[logits pretrain] Best epoch: {best_epoch} (loss={best_loss:.6f}); "
-    #         f"checkpoint saved to {self.logits_pretrain_ckpt}")
-
-    #     # let other ranks proceed and then load
-    #     if self.trainer.strategy is not None:
-    #         self.trainer.strategy.barrier()
-
-    # def on_fit_start(self):
-    #     # If already trained & cached → just load & return
-    #     if self._load_pretrained_logits_if_available():
-    #         if self.trainer.is_global_zero:
-    #             print("[logits pretrain] Loaded cached logits_model; skipping warmup.")
-    #         if self.trainer.strategy is not None:
-    #             self.trainer.strategy.barrier()
-    #         return
-
-    #     # If rank>0, let rank 0 try to pretrain. Others wait, then load.
-    #     if not self.trainer.is_global_zero:
-    #         if self.trainer.strategy is not None:
-    #             self.trainer.strategy.barrier()
-    #         if self._load_pretrained_logits_if_available():
-    #             return
-    #         return
-
-    #     # ---------- Rank 0: run the one-time warmup ----------
-    #     epochs = 40  # number of warmup epochs
-    #     print(f"[logits pretrain] Starting warmup for {epochs} epochs…")
-    #     logits_optimizer = torch.optim.Adam(self.logits_model.parameters(), lr=1e-4)
-    #     model_dev = next(self.logits_model.parameters()).device
-    #     best_loss = float("inf")   
-    #     best_state = None
-    #     best_epoch = -1
-    #     tok = self.multilingual_tokenizer
-    #     allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=model_dev)
-
-    #     for epoch in tqdm(range(epochs)):
-    #         epoch_losses = []
-    #         for batch in tqdm(self.data_module.train_dataloader()):
-    #             specs, lengths = (batch["specs"], batch["lengths_samples"])
-    #             y = specs[:, 0:1]  # (B, 1, F, T)
-    #             x = specs[:, 1:2]  # (B, 1, F, T)
-
-    #             # sample a single t per item in the (audio) batch, then broadcast across S
-    #             t = torch.rand(x.shape[0], device=x.device) * (self.sde.T - self.t_eps) + self.t_eps
-    #             t = t.to(model_dev)  # shape [B]
-
-    #             # ----- get clean/noisy logits: shapes [B, S, |A|] -----
-    #             _, clean_logits, clean_mask, clean_audio_embedding = self.extract_logits(x, lengths)   # [B, S1, C]
-    #             _, noisy_logits, noisy_mask, noisy_audio_embedding = self.extract_logits(y, lengths)   # [B, S2, C]
-    #             clean_logits = clean_logits.to(model_dev)
-    #             noisy_logits = noisy_logits.to(model_dev)
-    #             clean_logits, noisy_logits, mask = self.pad_align_logits_with_eot(clean_logits, clean_mask, noisy_logits, noisy_mask)  # [B, S, C], [B, S] boolean
-    #             B, S, C = clean_logits.shape
-
-    #             # ---- diffuse per-step (but do it in parallel) ----
-    #             noise = torch.randn_like(clean_logits)                           # [B, S, C]
-    #             # clean_logits_4d = clean_logits[..., None]                        # [B, S, C, 1]
-    #             # noisy_logits_4d = noisy_logits[..., None]                        # [B, S, C, 1]
-    #             mean_l, std_l = self.sde.marginal_prob(clean_logits, noisy_logits, t, is_logits=True)  # returns [B,S,C,1] mean, [B] std
-    #             # mean_l = mean_l.squeeze(-1)                                      # [B, S, C]
-    #             x_t_l = mean_l + std_l[:, None, None] * noise                    # [B, S, C]
-
-    #             match = (allowed_ids_t == tok.sot).nonzero(as_tuple=True)[0]
-    #             if match.numel() == 0:
-    #                 raise ValueError("tok.sot is not in allowed_ids_t; cannot write 1-hot for padded rows.")
-    #             sot_pos_in_allowed = int(match.item())
-    #             one_hot = F.one_hot(torch.full((B,), sot_pos_in_allowed, device=model_dev), num_classes=C).to(noisy_logits.dtype)
-    #             out_logits = one_hot.unsqueeze(1)                                 # [B,1,C]
-    #             alpha_t = torch.exp(-self.sde.theta_l * t)[:, None].to(model_dev)   # [B, 1]
-    #             sigma_l = self.sde._std(t, is_logits=True)[:, None].to(model_dev)   # [B, 1]
-    #             std2    = sigma_l ** 2                                            # [B, 1]
-    #             predicted_scores = []
-    #             for s in range(S):
-    #                 x_t_step = x_t_l[:, s, ...]           # [B, C] 
-    #                 noisy_step = noisy_logits[:, s, ...]  # same shape as above
-    #                 predicted_score = self.logits_model(x_t_step, noisy_step, t, noisy_audio_embedding, out_logits)  # [B, C]
-    #                 # predicted_score = x_t_step
-    #                 predicted_scores.append(predicted_score.unsqueeze(1))
-    #                 x_clean_pred = (x_t_step - (1.0 - alpha_t) * noisy_step + std2 * predicted_score) / alpha_t  # [B, C]
-    #                 out_logits = torch.cat([out_logits, x_clean_pred.unsqueeze(1)], dim=1)  # [B, cur_len+1, C]
-                    
-    #             # concatenate all steps along dimension 1 → [B, S, C]
-    #             predicted_score_all = torch.cat(predicted_scores, dim=1)
-    #             logits_optimizer.zero_grad()
-
-    #             sigma_l = self.sde._std(t, is_logits=True)[:, None, None].to(model_dev) 
-    #             resid = predicted_score_all * sigma_l + noise    # [B, S, C]
-    #             sq   = resid.pow(2).sum(-1)             # [B,S]
-    #             m    = mask.to(sq.dtype)                # float for arithmetic
-    #             loss = 0.5 * (sq * m).sum() / m.sum().clamp_min(1)
-
-    #             loss.backward()
-    #             logits_optimizer.step()
-    #             epoch_losses.append(loss.detach().cpu())
-
-    #         avg_loss = torch.stack(epoch_losses).mean()
-    #         self.logger.experiment.log({"logits_pretrain_loss": avg_loss.item()})
-
-    #         if avg_loss.item() < best_loss:
-    #             best_loss = avg_loss.item()
-    #             best_epoch = int(epoch + 1)
-    #             best_state = {
-    #                 "state_dict": self.logits_model.state_dict(),
-    #                 "meta": {
-    #                     "best_epoch": int(epoch + 1),
-    #                     "best_loss": float(best_loss),
-    #                     "allowed_toks_len": int(len(self.allowed_toks)),
-    #                 },
-    #             }
-    #             torch.save(best_state, self.logits_pretrain_ckpt)
-    #             print(f"[logits pretrain] New best model saved at epoch {epoch+1} (loss={best_loss:.6f})")
-
-    #     # best checkpoint was already saved inside the epoch loop
-    #     print(f"[logits pretrain] Best epoch: {best_epoch} (loss={best_loss:.6f}); "
-    #         f"checkpoint saved to {self.logits_pretrain_ckpt}")
-
-    #     # let other ranks proceed and then load
-    #     if self.trainer.strategy is not None:
-    #         self.trainer.strategy.barrier()
-
     def _loss(self, forward_out_audio, forward_out_logits, t, x_t_audio, z_audio, mean_audio, x_audio, x_t_logits, z_logits, mean_logits, x_logits, masks_audio, masks_logits):
         """
         Different loss functions for training the score model
@@ -951,18 +470,10 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             m_t = masks_audio.to(losses_a.dtype).squeeze(1).squeeze(1)   # [B, T]
             # per-frame mean over F (and channel if present)
             per_frame = losses_a.sum(dim=(1, 2))                  # [B, T]
-            # num = 0.5 * (per_frame * m_t).sum(dim=-1)              # [B]
-            # den = m_t.sum(dim=-1).clamp_min(1.0)                   # [B]
-            # loss_audio = (num / den).mean()                        # scalar
             loss_audio = 0.5 * (per_frame * m_t).sum(dim=-1).mean() 
-            # Sum over spatial dimensions and channels and mean over batch
-            # loss_audio = torch.mean(0.5*torch.sum(losses_a.reshape(losses_a.shape[0], -1), dim=-1))
             mask_f = masks_logits.to(losses_l.dtype)  # cast to float for arithmetic
             loss_per_step = losses_l.sum(dim=-1)  # [B, S]
             loss_logits = 0.5 * (loss_per_step * mask_f).sum(dim=-1).mean()  # scalar
-            # masked_loss = loss_per_step * mask_f  # [B, S]
-            # loss_logits = 0.5 * masked_loss.sum() / mask_f.sum().clamp_min(1)
-            # loss_logits = 0.5 * losses_l.mean(dim=(0, 1, 2))
         else:
             raise ValueError(f"Invalid loss type: {self.loss_type}")
         
@@ -1002,79 +513,17 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             noisy_logits, noisy_mask, noisy_audio_embedding = y_logits, y_mask, y_audio_embedding
             noisy_logits = noisy_logits.to(model_dev)
 
-        # if self.sampling_mode == "parallel":
-        #     _, noisy_logits, noisy_mask, noisy_audio_embedding = self.extract_logits(x0_hat, lengths, target_mean, target_std)
-        #     noisy_logits = noisy_logits.to(model_dev)
-        #     # 1) align clean & noisy
-        #     clean_logits, clean_mask, noisy_logits, noisy_mask, _ = \
-        #         self.pad_align_logits_with_eot(clean_logits, clean_mask, noisy_logits, noisy_mask)
-
-        #     # 2) align noisy & y
-        #     noisy_logits, noisy_mask, y_logits, y_mask, _ = \
-        #         self.pad_align_logits_with_eot(noisy_logits, noisy_mask, y_logits, y_mask)
-
-        #     # 3) align clean & y, reusing updated masks
-        #     clean_logits, clean_mask, y_logits, y_mask, masks_logits = \
-        #         self.pad_align_logits_with_eot(clean_logits, clean_mask, y_logits, y_mask)
-
-        #     half_t = 0.2 * self.sde.T
-        #     mask = (t < half_t).unsqueeze(-1).unsqueeze(-1)
-        #     logits_cond_parallel = torch.where(mask, noisy_logits, y_logits)
-
-        # elif self.sampling_mode == "full":
-        #     noisy_logits, noisy_mask, noisy_audio_embedding = y_logits, y_mask, y_audio_embedding
-        #     noisy_logits = noisy_logits.to(model_dev)
-
-        #     clean_logits, clean_mask, noisy_logits, noisy_mask, masks_logits = \
-        #         self.pad_align_logits_with_eot(clean_logits, clean_mask, noisy_logits, noisy_mask)
-
-        # elif self.sampling_mode == "nested":
-        #     _, x0_logits, x0_mask, x0_audio_embedding = self.extract_logits(x0_hat, lengths, target_mean, target_std)
-        #     x0_logits = x0_logits.to(model_dev)
-
-        #     # align x0 & y
-        #     x0_logits, x0_mask, y_logits, y_mask, _ = \
-        #         self.pad_align_logits_with_eot(x0_logits, x0_mask, y_logits, y_mask)
-
-        #     # align clean & y
-        #     clean_logits, clean_mask, y_logits, y_mask, _ = \
-        #         self.pad_align_logits_with_eot(clean_logits, clean_mask, y_logits, y_mask)
-
-        #     # align clean & x0
-        #     clean_logits, clean_mask, x0_logits, x0_mask, masks_logits = \
-        #         self.pad_align_logits_with_eot(clean_logits, clean_mask, x0_logits, x0_mask)
-
-        #     half_t = 0.2 * self.sde.T
-        #     mask = (t < half_t).unsqueeze(-1).unsqueeze(-1)
-        #     logits_cond_nested = torch.where(mask, x0_logits, y_logits)
-
-        #     noisy_logits, noisy_mask, noisy_audio_embedding = y_logits, y_mask, y_audio_embedding
-        #     noisy_logits = noisy_logits.to(model_dev)
-
-        # noisy_logits , _ , _ = dtw_align_batch(clean_logits, noisy_logits, metric="cosine", band_ratio=0.2)
         clean_logits, clean_mask, noisy_logits, noisy_mask, masks_logits = \
                 self.pad_align_logits_with_eot(clean_logits, clean_mask, noisy_logits, noisy_mask)
         
         sigma_logits = torch.randn_like(clean_logits)
-        # clean_logits_4d  = clean_logits[:, :, :, None]
-        # noisy_logits_4d = noisy_logits[:, :, :, None]
         
         mean_l, std_l = self.sde.marginal_prob(clean_logits, noisy_logits, t, is_logits=True)  
-        # mean_l = mean_l.squeeze(-1)
         x_t_l = mean_l + std_l[:, None, None] * sigma_logits
 
         half_t = 0.5 * self.sde.T                    # scalar
         mask    = (t < half_t).unsqueeze(-1).unsqueeze(-1)         # (B, 1, 1)  True ↔ late steps
         logits_cond = torch.where(mask, x_t_l, noisy_logits)
-        # if self.sampling_mode == "parallel":
-        #     forward_out_audio = self(x_t, y, t, is_logits=False, logits_cond=logits_cond_parallel)
-        #     forward_out_logits = self(x_t_l, logits_cond_parallel, t, is_logits=True, noisy_audio_embedding=noisy_audio_embedding)
-        # elif self.sampling_mode == "full":
-        #     forward_out_audio = self(x_t, y, t, is_logits=False, logits_cond=noisy_logits)
-        #     forward_out_logits = self(x_t_l, noisy_logits, t, is_logits=True, noisy_audio_embedding=noisy_audio_embedding)
-        # elif self.sampling_mode == "nested":
-        #     forward_out_audio = self(x_t, y, t, is_logits=False, logits_cond=logits_cond_nested)
-        #     forward_out_logits = self(x_t_l, noisy_logits, t, is_logits=True, noisy_audio_embedding=noisy_audio_embedding)
         if self.sampling_mode == "parallel":
             forward_out_audio = self(x_t, y, t, is_logits=False, logits_cond=logits_cond)
             forward_out_logits = self(x_t_l, noisy_logits, t, is_logits=True, noisy_audio_embedding=noisy_audio_embedding)
@@ -1144,15 +593,9 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             # -------------------- decode helpers ------------------------
             device = next(self.whisper.parameters()).device
             tok = self.multilingual_tokenizer
-            n_vocab = tok.encoding.n_vocab
 
-            # self.allowed_toks may be a Python list; turn into a device tensor once
             allowed_ids_t = torch.as_tensor(self.allowed_toks, dtype=torch.long, device=device)
 
-            # # a mask we will add to logits each step: allowed=0, disallowed=-inf
-            # neg_inf = -1e9
-            # base_mask = torch.full((n_vocab,), neg_inf, device=device)
-            # base_mask[allowed_ids_t] = 0.0
 
             # maximum tokens we’ll allow to emit (you can expose this as a hyperparam)
             max_decode_len = 224
@@ -1187,8 +630,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                     # logits over full vocab for each position so far
                     logits = self.whisper.decoder(out, feats).squeeze(0)  # (L, V)
                     next_logits = logits[-1]  # (V,)
-                    # record only the allowed positions' logits for this step -> (|A|,)
-                    # allowed_step = torch.softmax(next_logits.index_select(0, allowed_ids_t).unsqueeze(0),dim=-1)  # (1, |A|)
                     best_allowed_idx = int(torch.argmax(next_logits.index_select(0, allowed_ids_t)).item())
                     constrained_token_id = allowed_ids_t[best_allowed_idx].item()
                     constrained_tokens.append(constrained_token_id)
@@ -1196,9 +637,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                     allowed_step = next_logits.index_select(0, allowed_ids_t).unsqueeze(0)  # (1, |A|)
                     allowed_step = normalize_logits(allowed_step, target_mean, target_std)
                     per_step_allowed.append(allowed_step)
-
-                    # apply closed-set mask
-                    # next_logits = next_logits + base_mask
 
                     # greedy pick
                     next_id = int(torch.argmax(next_logits).item())
@@ -1208,12 +646,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                         break
                 
                 step_logits_allowed = torch.cat(per_step_allowed, dim=0)  # (S, |A|)
-                # strip the SOT sequence and optional trailing EOT for text
-                # gen = out[0].tolist()
-                # start = len(tok.sot_sequence_including_notimestamps)
-                # if len(gen) > 0 and gen[-1] == tok.eot:
-                #     gen = gen[:-1]
-                # text = tok.decode(gen[start:])
                 if len(constrained_tokens) > 0 and constrained_tokens[-1] == tok.eot:
                     constrained_tokens = constrained_tokens[:-1]
                 text = tok.decode(constrained_tokens)
@@ -1283,16 +715,12 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                     x_16k = x
                     y_16k = y
 
-                # # ground truth sentence
                 stem = os.path.splitext(os.path.basename(clean_file))[0]
                 category = parse_category_from_stem(stem)
-                # ground_truth = self.transcripts[category]
 
                 # closed-set ASR on noisy and clean
                 corrupted_transcript, corrupted_mel, corrupted_logits, corrupted_audio_embedding = decode_constrained(y_16k, target_mean, target_std)
                 clean_transcript, clean_mel, clean_logits, clean_audio_embedding = decode_constrained(x_16k, target_mean, target_std)
-                # corrupted_transcript_unconstrained, corrupted_mel = decode_unconstrained(y_16k)
-                # clean_transcript_unconstrained, clean_mel = decode_unconstrained(x_16k)
 
                 # Enhance the noisy speech (keep native sr for enhancement)
                 x_hat, logits_hat = self.enhance(y_tensor.unsqueeze(0), corrupted_logits.unsqueeze(0), corrupted_audio_embedding, N=self.sde.N, snr=0.5)
@@ -1306,9 +734,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
 
                 # closed-set ASR on enhanced
                 enhanced_transcript, enhanced_mel, enhanced_logits, enhanced_audio_embedding = decode_constrained(x_hat_16k, target_mean, target_std)
-                # enhanced_transcript_unconstrained, enhanced_mel = decode_unconstrained(x_hat_16k)
                 enhanced_transcript_processed = expand_contractions(self.text_normalizer(enhanced_transcript))
-                # ground_truth_processed = expand_contractions(self.text_normalizer(ground_truth))
                 corrupted_transcript_processed = expand_contractions(self.text_normalizer(corrupted_transcript))
                 clean_transcript_processed = expand_contractions(self.text_normalizer(clean_transcript))
                 logits_transcript_processed = expand_contractions(self.text_normalizer(logits_text))
@@ -1318,11 +744,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 o_list_corrupted.append(corrupted_transcript_processed)
                 o_list_clean.append(clean_transcript_processed)
                 o_list_logits.append(logits_transcript_processed)
-                # l_list.append(ground_truth_processed)
-
-                # wer_clean_    = self.wer_metric(clean_transcript_processed, ground_truth_processed)
-                # wer_enhanced_  = self.wer_metric(enhanced_transcript_processed, clean_transcript_processed)
-                # wer_corrupted_ = self.wer_metric(corrupted_transcript_processed, clean_transcript_processed)
 
                 # --- signal metrics ---
                 try:
@@ -1352,7 +773,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             # -------------------- aggregate + log ------------------------
             si_sdr_avg = si_sdr_sum / len(clean_files)
             estoi_avg = estoi_sum / len(clean_files)
-            # wer_clean     = self.wer_metric(o_list_clean, l_list)
             wer_enhanced  = self.wer_metric(o_list, o_list_clean)
             wer_corrupted = self.wer_metric(o_list_corrupted, o_list_clean)
             wer_logits    = self.wer_metric(o_list_logits, o_list_clean)
@@ -1361,7 +781,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             self.log('si_sdr', si_sdr_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('estoi',  estoi_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_enhanced',  wer_enhanced,  on_step=False, on_epoch=True, sync_dist=True)
-            # self.log('wer_clean',     wer_clean,     on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_corrupted', wer_corrupted, on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_logits', wer_logits, on_step=False, on_epoch=True, sync_dist=True)
 
@@ -1369,142 +788,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         loss = self._step(batch, batch_idx)
         self.log('valid_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
         return loss
-
-        #     for i, (clean_file, noisy_file) in enumerate(zip(clean_files, noisy_files)):
-        #         # Load the clean and noisy speech
-        #         x, sr_x = load(clean_file)
-        #         x = x.squeeze().numpy()
-        #         y, sr_y = load(noisy_file) 
-        #         assert sr_x == sr_y, "Sample rates of clean and noisy files do not match!"
-
-        #         # Resample if necessary
-        #         if sr_x != 16000:
-        #             x_16k = resample(x, orig_sr=sr_x, target_sr=16000).squeeze()
-        #             y_16k = resample(y, orig_sr=sr_y, target_sr=16000).squeeze()
-        #         else:
-        #             x_16k = x
-        #             y_16k = y
-                
-        #         label_str = os.path.splitext(os.path.basename(clean_file))[0].split('_')[0]
-        #         tokens = [*self.multilingual_tokenizer.sot_sequence_including_notimestamps] \
-        #                 + self.multilingual_tokenizer.encode(" " + label_str)
-        #         labels = tokens[1:] + [self.multilingual_tokenizer.eot]
-        #         multilingual_tokens = torch.tensor(tokens, dtype=torch.long)
-        #         labels = torch.tensor(labels, dtype=torch.long)
-
-        #         multilingual_tokens = multilingual_tokens.to(self.whisper.device)
-        #         labels = labels.to(self.whisper.device)
-
-        #         # ---- locate keyword position once per utterance ----------
-        #         keyword_idx = next(j for j, t in enumerate(labels.tolist()) if t not in special_ids)
-
-        #         def run_whisper(signal_16k, multilingual_tokens, labels, keyword_idx):
-        #             # 1) move the waveform to the same device Whisper lives on
-        #             device = next(self.whisper.parameters()).device
-        #             signal  = torch.tensor(signal_16k, dtype=torch.float32, device=device)
-
-        #             # 2) Whisper’s utility helpers
-        #             # signal_padded_ref = whisper.pad_or_trim(signal).flatten()      # (T,)
-        #             # mel_ref           = whisper.log_mel_spectrogram(signal_padded_ref).to(device)  # (80, T)
-        #             signal_padded = self._pad_or_trim(signal)                  
-        #             mel = self._log_mel_spectrogram(signal_padded)
-
-        #             # 3) Encoder‑decoder forward
-        #             # feats  = self.whisper.encoder(mel.unsqueeze(0))            # (1, …, T’)
-        #             feats  = self.whisper.encoder(mel)
-        #             tokens = multilingual_tokens.to(device).unsqueeze(0)       # (1, L)
-        #             logits = self.whisper.decoder(tokens, feats).squeeze(0)    # (L, vocab)
-
-        #             # 4) Cross‑entropy w.r.t. the ground‑truth label sequence
-        #             ce = self.whisper_loss(logits.view(-1, logits.size(-1)),
-        #                             labels.to(device).view(-1)).detach().cpu()
-
-        #             # 5) Closed‑set keyword probabilities
-        #             kw_logits = logits[keyword_idx]            # vector over entire vocab
-        #             kw_probs  = kw_logits                      # turn into probabilities
-        #             kw_probs  = kw_probs[self.allowed_toks.to(device)].softmax(-1)   # length‑10
-
-        #             pred_id = kw_probs.argmax().item()
-        #             return ce, pred_id, kw_probs, mel
-
-                
-        #         ce_loss_corrupted, pred_id_cor, kw_probs_cor, corrupted_mel = run_whisper(y_16k, multilingual_tokens, labels, keyword_idx)
-        #         ce_loss_clean, pred_id_cln, kw_probs_cln, clean_mel = run_whisper(x_16k, multilingual_tokens, labels, keyword_idx)
-
-        #         # Enhance the noisy speech
-        #         device = next(self.whisper.parameters()).device
-        #         y_tensor = torch.tensor(y_16k, dtype=torch.float32, device=device)
-        #         x_hat = self.enhance(y_tensor, kw_probs_cor, N=self.sde.N, snr=0.5) # added the kw_probs_cor for conditioning
-
-        #         if self.sr != 16000:
-        #             x_hat_16k = resample(x_hat, orig_sr=self.sr, target_sr=16000).squeeze()
-        #         else:
-        #             x_hat_16k = x_hat    
-
-        #         # x_hat_tensor = torch.tensor(x_hat_16k, dtype=torch.float32, device=device)
-        #         # x_hat_whisper = self._level_normalize(x_hat_tensor, target_dbfs=-20.0)
-        #         ce_loss_enhanced, pred_id_enh, kw_probs_enh, enhanced_mel = run_whisper(x_hat_16k, multilingual_tokens, labels, keyword_idx)
-        #         true_id = (self.allowed_toks == labels[keyword_idx]).nonzero(as_tuple=True)[0].item()
-        #         ground_truth = self.allowed_words[true_id]
-        #         # --- closed-set accuracy ----------------------------------
-        #         total_cnt   += 1
-        #         correct_cnt_enhanced += int(pred_id_enh == true_id)
-
-        #         # --- WER lists (as close to original as possible) ---------
-        #         enhanced_transcript  = self.allowed_words[pred_id_enh]
-        #         corrupted_transcript = self.allowed_words[pred_id_cor]
-        #         clean_transcript     = self.allowed_words[pred_id_cln]
-
-        #         o_list.append(enhanced_transcript)
-        #         o_list_corrupted.append(corrupted_transcript)
-        #         o_list_clean.append(clean_transcript)
-        #         l_list.append(ground_truth)
-        
-        #         # pesq_sum += pesq(16000, x_16k, x_hat_16k, 'wb') 
-        #         try:
-        #             pesq_sum  += pesq(16000, x_16k, x_hat_16k, 'wb')
-        #             pesq_cnt+=1
-        #         except Exception:
-        #             pass
-        #         # si_sdr_sum += si_sdr(x, x_hat)
-        #         si_sdr_sum += si_sdr(torch.tensor(x), torch.tensor(x_hat))
-        #         estoi_sum += stoi(x, x_hat, self.sr, extended=True)
-
-        #         stem = os.path.splitext(os.path.basename(clean_file))[0]
-        #         pattern = rf'^{re.escape(label_str)}_0(?!\d)'
-        #         if self.debug and re.match(pattern, stem):
-        #             debug_seen_per_label[label_str] += 1
-        #             self._plot_and_save_debug_info(
-        #                 clean_mel=clean_mel,
-        #                 corrupted_mel=corrupted_mel,
-        #                 enhanced_mel=enhanced_mel,
-        #                 clean_transcript=clean_transcript,
-        #                 corrupted_transcript=corrupted_transcript,
-        #                 enhanced_transcript=enhanced_transcript,
-        #                 ground_truth=ground_truth,
-        #                 index=debug_seen_per_label[label_str]
-        #             )
-
-        #     si_sdr_avg = si_sdr_sum / len(clean_files)
-        #     estoi_avg = estoi_sum / len(clean_files)
-        #     # --------------- metrics (names kept) -------------------------
-        #     wer_clean     = self.wer_metric(o_list_clean, l_list)
-        #     wer_enhanced  = self.wer_metric(o_list, l_list)
-        #     wer_corrupted = self.wer_metric(o_list_corrupted, l_list)
-        #     keyword_acc = torch.tensor(correct_cnt_enhanced / max(total_cnt, 1), device=self.device)
-
-        #     self.log('pesq',pesq_sum / pesq_cnt if pesq_cnt>0 else float('nan'), on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('si_sdr', si_sdr_avg, on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('estoi', estoi_avg, on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('wer_enhanced',  wer_enhanced,  on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('wer_clean',     wer_clean,     on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('wer_corrupted', wer_corrupted, on_step=False, on_epoch=True, sync_dist=True)
-        #     self.log('keyword_acc',  keyword_acc, on_step=False, on_epoch=True, sync_dist=True)
-
-        # loss = self._step(batch, batch_idx)
-        # self.log('valid_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
-
-        # return loss
     
     def test_step(self, batch, batch_idx):
         # If your validation_step returns logs/metrics, just reuse it
@@ -1539,22 +822,13 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             sot_pos_in_allowed = int(match.item())
             one_hot = torch.nn.functional.one_hot(torch.full((x_t.shape[0],), sot_pos_in_allowed, device=model_dev), num_classes=x_t.shape[-1]).to(x_t.dtype)
             out_logits = one_hot.unsqueeze(1)                                 # [B,1,C]
-            alpha_t = torch.exp(-self.sde.theta_l * t).view(-1, *([1] * (x_t.ndim - 1)))   # [B,1,(...)]
-            # std2    = (self.sde._std(t, is_logits=True).view_as(alpha_t)) ** 2                            # [B,1,(...)]
             std = self.sde._std(t, is_logits=True)
             predicted_scores = []
             for s in range(x_t.shape[1]):
                 x_t_step = x_t[:, s, ...]             # [B, C] 
                 noisy_step = y[:, s, ...]  # same shape as above
-                # predicted_score = self.logits_model(x_t_step, noisy_step, t, noisy_audio_embedding, out_logits)  # [B, C]
-                # predicted_score = self.logits_model(x_t_step, noisy_step, std, noisy_audio_embedding, out_logits)  # [B, C]
                 predicted_score = self.logits_model(x_t_step, noisy_step, std, noisy_audio_embedding, out_logits)  # [B, C]
-                # if we return epsilon:
-                # predicted_score = -predicted_noise/std.unsqueeze(1)  # [B, C]
-                # predicted_score = x_t_step
                 predicted_scores.append(predicted_score.unsqueeze(1))
-                # x_clean_pred = (x_t_step - (1.0 - alpha_t.squeeze(1)) * noisy_step + std2.squeeze(1) * predicted_score) / alpha_t.squeeze(1)
-                # out_logits = torch.cat([out_logits, x_clean_pred.unsqueeze(1)], dim=1)  # [B, cur_len+1, C]
                 out_logits = torch.cat([out_logits, noisy_step.unsqueeze(1)], dim=1)  # [B, cur_len+1, C]
                 
             # concatenate all steps along dimension 1 → [B, S, C]
@@ -1777,37 +1051,20 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 mel_scale="slaney",
             ).to(power.device) 
 
-            if fb.shape[0] != n_mels:      # old torchaudio → transpose
+            if fb.shape[0] != n_mels:      
                 fb = fb.t().contiguous()
 
             mel = fb @ power
             mel = mel[:, :-1]
-            # log_mel = torch.log(torch.clamp(mel, min=1e-10))
             log_mel = torch.log10(torch.clamp(mel, min=1e-10))
             log_mel = torch.maximum(log_mel, log_mel.max() - 8.0)
-            log_mel = (log_mel + 4.0) / 4.0
-
-            ref_log_mel = whisper.log_mel_spectrogram(audio_single)
-            
+            log_mel = (log_mel + 4.0) / 4.0            
             log_mels.append(log_mel)
         
         # Stack all mel spectrograms
         result = torch.stack(log_mels, dim=0)  # (B, n_mels, time_frames)
         
         return result
-    
-    def _level_normalize(self, wav: torch.Tensor, target_dbfs: float = -20.0, eps: float = 1e-8):
-        # wav: 1D float32 tensor in [-?, ?] at 16 kHz
-        wav = wav - wav.mean()                                      # DC removal
-        peak = wav.abs().max()
-        if peak > 1:                                                # guard against >1.0 from enhancement
-            wav = wav / (peak + eps)
-        rms = wav.pow(2).mean().sqrt().clamp_min(eps)
-        rms_db = 20.0 * torch.log10(rms)
-        gain = 10.0 ** ((target_dbfs - rms_db) / 20.0)
-        # cap gain so peaks stay below full scale
-        safe_gain = torch.minimum(gain, 0.99 / (wav.abs().max() + eps))
-        return wav * safe_gain
 
     def enhance(self, y, logits_cond, audio_embedding, sampler_type="pc", predictor="reverse_diffusion",
         corrector="ald", N=30, corrector_steps=1, snr=0.5, timeit=False,
