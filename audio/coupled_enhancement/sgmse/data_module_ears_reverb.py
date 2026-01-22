@@ -8,11 +8,8 @@ from glob import glob
 # from torchaudio import load
 import torchaudio
 import whisper
-import os
-import numpy as np
 import torch.nn.functional as F
 from sgmse.util.other import pad_spec
-import json
 import re
 
 
@@ -62,7 +59,7 @@ def parse_category_from_stem(stem: str) -> str:
 class Specs(Dataset):
     def __init__(self, data_dir, subset, dummy, shuffle_spec, num_frames,
             format='default', normalize="noisy", spec_transform=None,
-            stft_kwargs=None, **ignored_kwargs): # , transcripts_path="/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json"
+            stft_kwargs=None, **ignored_kwargs): 
 
         # Read file paths according to file naming format.
         if format == "default":
@@ -72,13 +69,6 @@ class Specs(Dataset):
             self.noisy_files = []
             self.noisy_files += sorted(glob(join(data_dir, subset, "reverberant", "*.wav")))
             self.noisy_files += sorted(glob(join(data_dir, subset, "reverberant", "**", "*.wav")))
-        # elif format == "reverb":
-        #     self.clean_files = []
-        #     self.clean_files += sorted(glob(join(data_dir, subset, "anechoic", "*.wav")))
-        #     self.clean_files += sorted(glob(join(data_dir, subset, "anechoic", "**", "*.wav")))
-        #     self.noisy_files = []
-        #     self.noisy_files += sorted(glob(join(data_dir, subset, "reverb", "*.wav")))
-        #     self.noisy_files += sorted(glob(join(data_dir, subset, "reverb", "**", "*.wav")))
         else:
             # Feel free to add your own directory format
             raise NotImplementedError(f"Directory format {format} unknown!")
@@ -96,12 +86,6 @@ class Specs(Dataset):
         )
         self.eot_id = self.multilingual_tokenizer.eot
 
-        # # Load transcripts once
-        # with open(transcripts_path, "r", encoding="utf-8") as f:
-        #     self.transcripts = json.load(f)
-        # if not isinstance(self.transcripts, dict):
-        #     raise ValueError(f"Transcripts at {transcripts_path} must be a dict of {{category: transcript_str}}")
-
         assert all(k in stft_kwargs.keys() for k in ["n_fft", "hop_length", "center", "window"]), "misconfigured STFT kwargs"
         self.stft_kwargs = stft_kwargs
         self.hop_length = self.stft_kwargs["hop_length"]
@@ -110,9 +94,6 @@ class Specs(Dataset):
     def __getitem__(self, i):
         clean_path = self.clean_files[i]
         noisy_path = self.noisy_files[i]
-        # # Parse category from filename stem
-        # stem = os.path.splitext(os.path.basename(clean_path))[0]
-        # category = parse_category_from_stem(stem)
         x, sr = torchaudio.load(clean_path)
         y, sr_y = torchaudio.load(noisy_path)
 
@@ -137,51 +118,14 @@ class Specs(Dataset):
         x = x / normfac
         y = y / normfac
 
-        # x = x[..., :self.hop_length*127]
-        # y = y[..., :self.hop_length*127]
         current_len = x.size(-1)
-        # # formula applies for center=True
-        # target_len = (self.num_frames - 1) * self.hop_length
-        # pad = max(target_len - current_len, 0)
-        # if pad == 0:
-        #     # extract random part of the audio file
-        #     if self.shuffle_spec:
-        #         start = int(np.random.uniform(0, current_len-target_len))
-        #     else:
-        #         start = int((current_len-target_len)/2)
-        #     x = x[..., start:start+target_len]
-        #     y = y[..., start:start+target_len]
-        # else:
-        #     # pad audio if the length T is smaller than num_frames
-        #     # x = F.pad(x, (0, pad), mode='constant')
-        #     # y = F.pad(y, (0, pad), mode='constant')
-        #     x = F.pad(x, (pad//2, pad//2+(pad%2)), mode='constant')
-        #     y = F.pad(y, (pad//2, pad//2+(pad%2)), mode='constant')
 
         X = torch.stft(x, **self.stft_kwargs)
         Y = torch.stft(y, **self.stft_kwargs)
 
         X, Y = self.spec_transform(X), self.spec_transform(Y)
-        # X = pad_spec(X, mode="zero_pad")
-        # Y = pad_spec(Y, mode="zero_pad")
+
         specs = torch.stack([Y, X], dim=0)  # (2, F, T), complex
-
-        # # --------- NEW: tokens & labels from transcript ---------
-        # # Get transcript text by category; raise if missing (helps catch dataset issues)
-        # try:
-        #     transcript = self.transcripts[category]
-        # except KeyError as e:
-        #     raise KeyError(f"Transcript missing for category '{category}'. Check transcripts.json keys.") from e
-
-        # # Whisper best practice: prefix a space so tokenization behaves like continuation
-        # # SOT + encoded transcript, labels = next-token shift + EOT
-        # tok = self.multilingual_tokenizer
-        # tokens = [*tok.sot_sequence_including_notimestamps] + tok.encode(" " + transcript)
-        # labels = tokens[1:] + [tok.eot]
-
-        # multilingual_tokens = torch.tensor(tokens, dtype=torch.long)
-        # labels = torch.tensor(labels, dtype=torch.long)
-        # # --------------------------------------------------------
 
         T_frames = specs.shape[-1]
 
@@ -207,18 +151,10 @@ class STFTDataCollatorWithPadding:
         # Each item: (specs [2,F,T_i], toks, labs, length_samples, T_frames_i)
         specs_list, sample_lengths, T_list = zip(*features)
 
-        # # 1) Pad multilingual tokens / labels (unchanged behavior)
-        # max_tok = max(max(len(t) for t in toks_list), max(len(l) for l in labs_list))
-        # toks = torch.stack([F.pad(t, (0, max_tok - len(t)), value=self.eot_id) for t in toks_list])
-        # labs = torch.stack([F.pad(l, (0, max_tok - len(l)), value=self.ignore_index) for l in labs_list])
-
-        # 2) Find max T in batch and pad specs to batch max (per-batch padding)
         # Stack after padding because T_i differ
-        F_dim = specs_list[0].shape[-2]  # frequency bins
         max_T = max(int(Ti) for Ti in T_list)
 
         padded_specs = []
-        time_masks = []  # [B,1,1,T_max_after_multiple]
 
         for specs, Ti in zip(specs_list, T_list):
             # specs: [2,F,Ti], complex
@@ -230,27 +166,20 @@ class STFTDataCollatorWithPadding:
 
         specs = torch.stack(padded_specs, dim=0)  # [B,2,F,max_T], complex
 
-        # 3) Now ensure T is a multiple of the UNet time stride
         specs, t_mult_pad = pad_time_to_multiple(specs, self.time_downsample_multiple)
         T_after = specs.shape[-1]
 
-        # 4) Build time mask (1 for real, 0 for padded)
         # First mask up to max_T, then extend with zeros for the multiple padding
         mask = torch.zeros(len(T_list), 1, 1, T_after, dtype=specs.real.dtype)
         for b, Ti in enumerate(T_list):
             mask[b, :, :, :int(Ti)] = 1.0
-        # After step (2) we padded to max_T; areas [Ti:max_T) are already zeros.
-        # After step (3) we may have added t_mult_pad zeros at the end — kept as zeros.
 
-        # 5) Also pad tokens/labels already done above
         sample_lengths = torch.tensor(sample_lengths, dtype=torch.long)
         T_frames = torch.tensor(T_list, dtype=torch.long)
 
         return {
             "specs": specs,                      # [B,2,F,T*], complex
             "time_mask": mask,                   # [B,1,1,T*], float {0,1}
-            # "multilingual_tokens": toks,         # [B,L_tokens]
-            # "labels": labs,                      # [B,L_tokens]
             "lengths_samples": sample_lengths,   # [B] original waveform lengths (samples)
             "lengths_frames": T_frames           # [B] original frame counts before padding
         }
@@ -259,8 +188,8 @@ class STFTDataCollatorWithPadding:
 class SpecsDataModule(pl.LightningDataModule):
     @staticmethod
     def add_argparse_args(parser):
-        parser.add_argument("--base_dir", type=str, default="/mlspeech/data/gilad/paper_ears_reverbed/EARS-Reverb_v2_4sec_chunks", help="The base directory of the dataset. Should contain `train`, `valid` and `test` subdirectories, each of which contain `clean` and `noisy` subdirectories.")
-        parser.add_argument("--format", type=str, choices=("default", "reverb"), default="default", help="Read file paths according to file naming format.")
+        parser.add_argument("--base_dir", type=str, required=True, help="The base directory of the dataset. Should contain `train`, `valid` and `test` subdirectories, each of which contain `clean` and `noisy` subdirectories.")
+        parser.add_argument("--format", type=str, choices=("default"), default="default", help="Read file paths according to file naming format.")
         parser.add_argument("--batch_size", type=int, default=1, help="The batch size. 8 by default.")
         parser.add_argument("--n_fft", type=int, default=1534, help="Number of FFT bins. 510 by default.")   # to assure 256 freq bins
         parser.add_argument("--hop_length", type=int, default=384, help="Window hop length. 128 by default.")
@@ -273,7 +202,6 @@ class SpecsDataModule(pl.LightningDataModule):
         parser.add_argument("--normalize", type=str, choices=("clean", "noisy", "not"), default="noisy", help="Normalize the input waveforms by the clean signal, the noisy signal, or not at all.")
         parser.add_argument("--transform_type", type=str, choices=("exponent", "log", "none"), default="exponent", help="Spectogram transformation for input representation.")
         parser.add_argument("--time_downsample_multiple", type=int, default=32, help="Pad time frames to this multiple so UNet down/upsampling divides cleanly.")
-        # parser.add_argument("--transcripts_path", type=str, default="/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json", help="Path to transcripts JSON mapping {category: transcript_str}.")
         return parser
 
     def __init__(
@@ -314,18 +242,7 @@ class SpecsDataModule(pl.LightningDataModule):
             stft_kwargs=self.stft_kwargs, num_frames=self.num_frames,
             spec_transform=self.spec_fwd,
             **self.kwargs
-        ) # , transcripts_path=self.kwargs.get("transcripts_path","/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json")
-        # if stage == 'fit' or stage is None:
-        #     self.train_set = Specs(data_dir=self.base_dir, subset='train',
-        #         dummy=self.dummy, shuffle_spec=True, format=self.format,
-        #         normalize=self.normalize, **specs_kwargs)
-        #     self.valid_set = Specs(data_dir=self.base_dir, subset='valid',
-        #         dummy=self.dummy, shuffle_spec=False, format=self.format,
-        #         normalize=self.normalize, **specs_kwargs)
-        # if stage == 'test' or stage is None:
-        #     self.test_set = Specs(data_dir=self.base_dir, subset='test',
-        #         dummy=self.dummy, shuffle_spec=False, format=self.format,
-        #         normalize=self.normalize, **specs_kwargs)
+        ) 
         if stage in ('fit', None):
             self.train_set = Specs(
                 data_dir=self.base_dir, subset='train',
