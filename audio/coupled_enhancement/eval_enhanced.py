@@ -134,20 +134,13 @@ def log_mel_spectrogram(
 
 def main():
     parser = argparse.ArgumentParser()
-    # parser.add_argument("--enhanced_root", type=str, required=False,
-    #                     default="/mlspeech/data/gilad/paper_ears_reverbed/EARS-Reverb_v2_4sec_chunks_test_enhanced_with_logits_nested")
-    # parser.add_argument("--clean_root", type=str, required=False,
-    #                     default="/mlspeech/data/gilad/paper_ears_reverbed/EARS-Reverb_v2_4sec_chunks/test/clean")
-    parser.add_argument("--enhanced_root", type=str, required=False,
-                        default="/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks_test_enhanced_with_logits_nested_epoch20")
-    parser.add_argument("--clean_root", type=str, required=False,
-                        default="/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks/test/clean")
+    parser.add_argument("--enhanced_root", type=str, required=True, help="Root directory of enhanced samples")
+    parser.add_argument("--clean_root", type=str, required=True, help="Root directory of clean samples")
     parser.add_argument("--model", type=str, default="base")
     parser.add_argument("--language", type=str, default="en")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out_dir", type=str, default="ears_wer_output")
-    parser.add_argument("--transcripts_json", type=str,
-                        default="/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json")
+    parser.add_argument("--transcripts_json", type=str, required=True, help="Path to the transcripts JSON file")
     args = parser.parse_args()
 
     enhanced_root = Path(args.enhanced_root).expanduser().resolve()
@@ -190,63 +183,6 @@ def main():
     base_mask[allowed_ids_t] = 0.0
     max_decode_len = 224
 
-    # @torch.no_grad()
-    # def decode_constrained(signal_16k):
-    #     """
-    #     Unconstrained greedy decode for Whisper's internal state progression.
-    #     But we retrospectively extract logits for only the allowed set at each step,
-    #     AND construct the output text from argmax of the allowed set.
-    #     Returns (pred_text, mel, step_logits_allowed[S,|A|], audio_embedding[1,T',C]).
-    #     """
-    #     wav = torch.tensor(signal_16k, dtype=torch.float32, device=device)
-    #     true_audio_length = wav.shape[-1]
-    #     wav = pad_or_trim(wav)  # (T,)
-    #     mel = log_mel_spectrogram(wav)  # (1, 80, Tm)
-    #     feats = wmodel.encoder(mel)     # (1, T', C)
-
-    #     hop_length = 160
-    #     encoder_downsampling_factor = 4
-    #     true_mel_length = (true_audio_length + hop_length - 1) // hop_length
-    #     true_encoder_length = (true_mel_length + encoder_downsampling_factor - 1) // encoder_downsampling_factor
-    #     audio_embedding = feats[:, :true_encoder_length, :]
-
-    #     prefix = torch.tensor([tok.sot_sequence_including_notimestamps],
-    #                         dtype=torch.long, device=device)  # (1, L0)
-    #     out = prefix.clone()
-    #     per_step_allowed = []  # store constrained logits
-    #     constrained_tokens = []  # store tokens from closed set
-
-    #     for _ in range(max_decode_len):
-    #         logits = wmodel.decoder(out, feats).squeeze(0)  # (L, V)
-    #         next_logits = logits[-1]                        # (V,)
-
-    #         # Extract and normalize logits for ONLY the allowed set
-    #         allowed_logits = next_logits.index_select(0, allowed_ids_t)  # (|A|,)
-    #         allowed_probs = torch.softmax(allowed_logits.unsqueeze(0), dim=-1)  # (1, |A|)
-    #         per_step_allowed.append(allowed_probs)
-
-    #         # Pick the best token from the ALLOWED SET for output text
-    #         best_allowed_idx = int(torch.argmax(allowed_logits).item())
-    #         constrained_token_id = allowed_ids_t[best_allowed_idx].item()
-    #         constrained_tokens.append(constrained_token_id)
-
-    #         # But continue decoding with UNCONSTRAINED token for next step
-    #         next_id = int(torch.argmax(next_logits).item())
-    #         out = torch.cat([out, torch.tensor([[next_id]], device=device)], dim=1)
-            
-    #         # Check EOT from the constrained token (for output text)
-    #         if constrained_token_id == tok.eot:
-    #             break
-
-    #     step_logits_allowed = torch.cat(per_step_allowed, dim=0)  # (S, |A|)
-        
-    #     # Decode text from the CONSTRAINED tokens
-    #     if len(constrained_tokens) > 0 and constrained_tokens[-1] == tok.eot:
-    #         constrained_tokens = constrained_tokens[:-1]
-    #     text = tok.decode(constrained_tokens)
-        
-    #     return text, mel, step_logits_allowed, audio_embedding
-
     @torch.no_grad()
     def decode_constrained(signal_16k):
         """
@@ -270,18 +206,9 @@ def main():
             # logits over full vocab for each position so far
             logits = wmodel.decoder(out, feats).squeeze(0)  # (L, V)
             next_logits = logits[-1]  # (V,)
-            # record only the allowed positions' logits for this step -> (|A|,)
-            # allowed_step = torch.softmax(next_logits.index_select(0, allowed_ids_t).unsqueeze(0),dim=-1)  # (1, |A|)
             best_allowed_idx = int(torch.argmax(next_logits.index_select(0, allowed_ids_t)).item())
             constrained_token_id = allowed_ids_t[best_allowed_idx].item()
             constrained_tokens.append(constrained_token_id)
-
-            # allowed_step = next_logits.index_select(0, allowed_ids_t).unsqueeze(0)  # (1, |A|)
-            # allowed_step = normalize_logits(allowed_step, target_mean, target_std)
-            # per_step_allowed.append(allowed_step)
-
-            # apply closed-set mask
-            # next_logits = next_logits + base_mask
 
             # greedy pick
             next_id = int(torch.argmax(next_logits).item())
@@ -294,56 +221,10 @@ def main():
             constrained_tokens = constrained_tokens[:-1]
         text = tok.decode(constrained_tokens)
         return text
-    
-    # def decode_only_constrained(signal_16k):
-    #     """
-    #     Greedy, closed-set decode: at each step, mask logits to allowed set.
-    #     Returns (pred_text, mel, step_logits_allowed[S,|A|], audio_embedding[1,T',C]).
-    #     (We won't save the logits/embeddings, just keep them local.)
-    #     """
-    #     wav = torch.tensor(signal_16k, dtype=torch.float32, device=device)
-    #     true_audio_length = wav.shape[-1]
-    #     wav = pad_or_trim(wav)  # (T,)
-    #     mel = log_mel_spectrogram(wav)  # (1, 80, Tm)
-    #     feats = wmodel.encoder(mel)     # (1, T', C)
-
-    #     hop_length = 160
-    #     encoder_downsampling_factor = 4
-    #     true_mel_length = (true_audio_length + hop_length - 1) // hop_length
-    #     true_encoder_length = (true_mel_length + encoder_downsampling_factor - 1) // encoder_downsampling_factor
-    #     audio_embedding = feats[:, :true_encoder_length, :]
-
-    #     prefix = torch.tensor([tok.sot_sequence_including_notimestamps],
-    #                           dtype=torch.long, device=device)  # (1, L0)
-    #     out = prefix.clone()
-    #     per_step_allowed = []  # store for completeness (not saved)
-
-    #     for _ in range(max_decode_len):
-    #         logits = wmodel.decoder(out, feats).squeeze(0)  # (L, V)
-    #         next_logits = logits[-1]                        # (V,)
-
-    #         allowed_step = torch.softmax(
-    #             next_logits.index_select(0, allowed_ids_t).unsqueeze(0), dim=-1
-    #         )
-    #         per_step_allowed.append(allowed_step)
-
-    #         next_logits = next_logits + base_mask
-    #         next_id = int(torch.argmax(next_logits).item())
-    #         out = torch.cat([out, torch.tensor([[next_id]], device=device)], dim=1)
-    #         if next_id == tok.eot:
-    #             break
-
-    #     step_logits_allowed = torch.cat(per_step_allowed, dim=0)  # (S, |A|)
-    #     gen = out[0].tolist()
-    #     start = len(tok.sot_sequence_including_notimestamps)
-    #     if len(gen) > 0 and gen[-1] == tok.eot:
-    #         gen = gen[:-1]
-    #     text = tok.decode(gen[start:])
-    #     return text, mel, step_logits_allowed, audio_embedding
 
     # -------- main loop: ONLY save transcripts + final WER --------
     print("[info] Transcribing and computing WER…")
-    hyps_c, refs_c, refs_only_c, hyps_only_c, hyps_r, refs_r = [], [], [], [], [], []
+    hyps_c, refs_c = [], []
 
     for fid in tqdm(ids):
         clean_path = clean_map[fid]
@@ -362,61 +243,17 @@ def main():
         # ---------- constrained decoding ----------
         enh_text_c= decode_constrained(enh_audio_16k)
         clean_text_c = decode_constrained(clean_audio_16k)
-        # enh_text_c, _, _, _ = decode_constrained(enh_audio_16k)
-        # clean_text_c, _, _, _ = decode_constrained(clean_audio_16k)
-        # enh_text_only_c, _, _, _ = decode_only_constrained(enh_audio_16k)
-        # clean_text_only_c, _, _, _ = decode_only_constrained(clean_audio_16k)
-
-        # # ---------- regular Whisper decoding ----------
-        # with torch.no_grad():
-        #     clean_wav_30s = whisper_module.pad_or_trim(clean_audio_16k.to(device, dtype=torch.float32))
-        #     enh_wav_30s   = whisper_module.pad_or_trim(enh_audio_16k.to(device, dtype=torch.float32))
-
-        #     clean_mel = whisper_module.log_mel_spectrogram(clean_wav_30s).to(device)  # [80, T]
-        #     enh_mel   = whisper_module.log_mel_spectrogram(enh_wav_30s).to(device)    # [80, T]
-
-        #     clean_reg = wmodel.decode(clean_mel, options)
-        #     enh_reg   = wmodel.decode(enh_mel,   options)
-
-
-        # clean_text_r = clean_reg.text
-        # enh_text_r   = enh_reg.text
 
         # ---------- normalization ----------
         clean_text_c_n = normalizer(clean_text_c)
         enh_text_c_n   = normalizer(enh_text_c)
-        # clean_text_only_c_n = normalizer(clean_text_only_c)
-        # enh_text_only_c_n   = normalizer(enh_text_only_c)
-        # clean_text_r_n = normalizer(clean_text_r)
-        # enh_text_r_n   = normalizer(enh_text_r)
-
-        # ---------- save all into one file ----------
-        # combined_text = (
-        #     f"[CLEAN - CONSTRAINED]\n{clean_text_c_n}\n\n"
-        #     f"[ENHANCED - CONSTRAINED]\n{enh_text_c_n}\n\n"
-        #     f"[CLEAN - REGULAR]\n{clean_text_r_n}\n\n"
-        #     f"[ENHANCED - REGULAR]\n{enh_text_r_n}\n"
-        # )
-        # (transcripts_dir / f"{fid}.txt").write_text(combined_text, encoding="utf-8")
-
         refs_c.append(clean_text_c_n)
         hyps_c.append(enh_text_c_n)
-        # refs_only_c.append(clean_text_only_c_n)
-        # hyps_only_c.append(enh_text_only_c_n)
-        # refs_r.append(clean_text_r_n)
-        # hyps_r.append(enh_text_r_n)
 
     wer_c = wer_metric(hyps_c, refs_c).item()
-    # wer_only_c = wer_metric(hyps_only_c, refs_only_c).item()
-    # wer_r = wer_metric(hyps_r, refs_r).item()
-    # (out_dir / "metrics_c.json").write_text(json.dumps({"num_pairs": len(ids), "wer": wer_c}, indent=2), encoding="utf-8")
-    # (out_dir / "metrics_r.json").write_text(json.dumps({"num_pairs": len(ids), "wer": wer_r}, indent=2), encoding="utf-8")
-
     print(f"[done] Wrote transcripts to: {transcripts_dir}")
     print(f"[done] Wrote overall WER to: {out_dir / 'metrics.json'}")
     print(f"[result] Overall WER constrained (enhanced vs clean): {wer_c:.4f}")
-    # print(f"[result] Overall WER constrained only (enhanced vs clean): {wer_only_c:.4f}")
-    # print(f"[result] Overall WER regular (enhanced vs clean): {wer_r:.4f}")
 
 if __name__ == "__main__":
     main()
