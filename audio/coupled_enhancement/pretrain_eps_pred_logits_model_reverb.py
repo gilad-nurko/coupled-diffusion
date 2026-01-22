@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""
-Lightning rewrite of your logits pretraining script.
-- Removes manual torch.distributed / DDP; uses PyTorch Lightning Trainer instead.
-- Preserves your SDE/DataModule/Whisper token pipeline.
-- Adds per-step linear LR decay from 1e-3 -> 1e-4 across *optimizer steps* (not epochs).
-- Uses WandbLogger + ModelCheckpoint (best + optional every N steps).
-
-Run example:
-python logits_pretrain_lightning.py \
-  --epochs 40 --devices 8 --accelerator gpu --strategy ddp --batch_size 8 \
-  --sr 48000 --whisper_name base --whisper_lang en --sde ouve \
-  --wandb_project logits_pretrain --wandb_name myrun \
-  --save_every 1000 --accumulate_grad_batches 1
-
-Notes:
-- We compute total optimizer steps in `main()` BEFORE constructing the module and pass it in as `total_steps_for_sched` to guarantee exact per-step LR decay.
-- SpecsDataModule is used as-is (your implementation). We call `setup('fit')` to query train loader length.
-- Whisper is loaded in `setup()` on each rank and moved to the correct device.
-- Saving: best checkpoint (lowest train loss) to `--logits_pretrain_ckpt`; optional step snapshots via `--save_every`.
-"""
 
 import os
 import json
@@ -407,8 +387,7 @@ class LogitsPretrainModule(pl.LightningModule):
             self.tokenizer = whisper.tokenizer.get_tokenizer(
                 True, language=self.hparams.whisper_lang, task=options.task
             )
-            tp_effective = self.hparams.transcripts_path or \
-                "/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json"
+            tp_effective = self.hparams.transcripts_path
             allowed_toks = build_allowed_token_id_set_with_tok(tp_effective, self.tokenizer)
             self.allowed_ids_t = torch.as_tensor(allowed_toks, dtype=torch.long, device=self.device)
     
@@ -492,7 +471,6 @@ class LogitsPretrainModule(pl.LightningModule):
         self.log("train/lr", cur_lr, on_step=True, on_epoch=False, prog_bar=False, sync_dist=True)
         self.log("trainer/global_step", float(self.global_step), on_step=True, on_epoch=False, prog_bar=False, sync_dist=True)
 
-        # optional: wandb.log() block can remain if you want it for steps
         return loss
     
     def validation_step(self, batch, batch_idx):
@@ -501,106 +479,6 @@ class LogitsPretrainModule(pl.LightningModule):
         self.log("val/loss_step",  loss, on_step=True,  on_epoch=False, prog_bar=True,  batch_size=B, sync_dist=True)
         self.log("val/loss_epoch", loss, on_step=False, on_epoch=True,  prog_bar=True,  batch_size=B, sync_dist=True)
         return loss
-
-
-
-    # def training_step(self, batch, batch_idx):
-    #     specs, lengths = batch["specs"], batch["lengths_samples"]
-    #     y = specs[:, 0:1]  # noisy [B,1,F,T]
-    #     x = specs[:, 1:2]  # clean [B,1,F,T]
-
-    #     audio_mean = y.mean(dim=(1, 2, 3), keepdim=True).abs()  # [B,1,1,1]
-    #     audio_std  = y.std(dim=(1, 2, 3), keepdim=True)   # [B,1,1,1]
-    #     target_mean = audio_mean.squeeze(-1).squeeze(-1)  # [B,1]
-    #     target_std  = audio_std.squeeze(-1).squeeze(-1)   # [B,1]
-
-    #     B = x.shape[0]
-    #     t = torch.rand(B, device=self.device) * (self.sde.T - self.hparams.t_eps) + self.hparams.t_eps
-
-    #     with torch.no_grad():
-    #         _, clean_logits, clean_mask, clean_audio_embedding = extract_logits_batch(
-    #             self.whisper_model, self.tokenizer, x, lengths, self.trainer.datamodule.istft,
-    #             self.hparams.sr, self.device, self.allowed_ids_t, target_mean, target_std)
-    #         _, noisy_logits,  noisy_mask,  noisy_audio_embedding  = extract_logits_batch(
-    #             self.whisper_model, self.tokenizer, y, lengths, self.trainer.datamodule.istft,
-    #             self.hparams.sr, self.device, self.allowed_ids_t, target_mean, target_std)
-
-    #     clean_logits = clean_logits.to(self.device)
-    #     noisy_logits = noisy_logits.to(self.device)
-    #     clean_mask   = clean_mask.to(self.device)
-    #     noisy_mask   = noisy_mask.to(self.device)
-
-    #     clean_logits, noisy_logits, mask = pad_align_logits_with_eot(
-    #         clean_logits, clean_mask, noisy_logits, noisy_mask,
-    #         self.allowed_ids_t, self.tokenizer.eot
-    #     )
-    #     B, S, C = clean_logits.shape
-
-    #     noise = torch.randn_like(clean_logits)
-    #     mean_l, std_l = self.sde.marginal_prob(clean_logits, noisy_logits, t, is_logits=True)
-    #     x_t_l = mean_l + std_l[:, None, None] * noise
-
-    #     # AR bootstrap with SOT onehot
-    #     match = (self.allowed_ids_t == self.tokenizer.sot).nonzero(as_tuple=True)[0]
-    #     if match.numel() == 0:
-    #         raise ValueError("sot not in allowed token set.")
-    #     sot_pos = int(match.item())
-    #     one_hot = F.one_hot(torch.full((B,), sot_pos, device=self.device), num_classes=C).to(noisy_logits.dtype)
-    #     out_logits = one_hot.unsqueeze(1)
-
-    #     alpha_t = torch.exp(-self.sde.theta_l * t)[:, None]
-    #     sigma_l = self.sde._std(t, is_logits=True)[:, None]
-    #     std2    = sigma_l ** 2
-
-    #     predicted_scores = []
-    #     # predictes_baselines = []
-    #     for s_idx in range(S):
-    #         x_t_step   = x_t_l[:, s_idx, :]
-    #         noisy_step = noisy_logits[:, s_idx, :]
-    #         # pred = self.logits_model(x_t_step, noisy_step, t, noisy_audio_embedding, out_logits)
-    #         pred = self.logits_model(x_t_step, noisy_step, std_l, noisy_audio_embedding, out_logits)
-    #         predicted_scores.append(pred.unsqueeze(1))
-    #         # predictes_baselines.append(((x_t_step-noisy_step)/(std_l.unsqueeze(-1))).unsqueeze(1))
-    #         # x_clean_pred = (x_t_step - (1.0 - alpha_t) * noisy_step + std2 * pred) / alpha_t
-    #         # x_clean_pred = (x_t_step - (1.0 - alpha_t) * noisy_step + sigma_l * pred) / alpha_t
-    #         # out_logits = torch.cat([out_logits, x_clean_pred.unsqueeze(1)], dim=1)
-    #         out_logits = torch.cat([out_logits, noisy_step.unsqueeze(1)], dim=1)
-
-    #     predicted_all = torch.cat(predicted_scores, dim=1)
-    #     # baseline_all = torch.cat(predictes_baselines, dim=1)
-
-    #     resid = predicted_all * sigma_l[:, None] + noise
-    #     # resid = predicted_all + noise
-    #     # resid = predicted_all - noise
-    #     sq = resid.pow(2).sum(-1)
-    #     m  = mask.to(sq.dtype)
-    #     loss = 0.5 * (sq * m).sum() / m.sum().clamp_min(1.0)
-    #     # resid_basline = baseline_all - noise
-    #     # sq_baseline = resid_basline.pow(2).sum(-1)
-    #     # loss_baseline = 0.5 * (sq_baseline * m).sum() / m.sum().clamp_min(1.0)
-    #     # print(f'[logits pretrain] step {self.global_step} loss: {loss.item():.6f}, baseline: {loss_baseline.item():.6f}')
-
-    #     # ================== Logging ==================
-    #     cur_lr = self.optimizers().param_groups[0]["lr"] if self.optimizers() else self.hparams.initial_lr
-
-    #     # 1️⃣ Log to Lightning & WandB
-    #     self.log("train/loss_step", loss, on_step=True, on_epoch=False, prog_bar=True, batch_size=B)
-    #     self.log("train/loss_epoch", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=B)
-    #     self.log("train/loss_current", loss.detach(), on_step=True, on_epoch=False, prog_bar=False)
-    #     self.log("train/lr", cur_lr, on_step=True, on_epoch=False, prog_bar=False)
-    #     self.log("trainer/global_step", float(self.global_step), on_step=True, on_epoch=False, prog_bar=False)
-
-    #     # 2️⃣ Explicit WandB log — ensures visibility in “Charts”
-    #     import wandb
-    #     if wandb.run is not None:
-    #         wandb.log({
-    #             "train/loss_step": loss.item(),
-    #             "train/loss_current": loss.item(),
-    #             "train/lr": cur_lr,
-    #             "global_step": self.global_step
-    #         })
-            
-    #     return loss
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.logits_model.parameters(), lr=self.hparams.initial_lr)
@@ -627,8 +505,7 @@ class LogitsPretrainModule(pl.LightningModule):
 def add_argparse_args(parser: ArgumentParser):
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--t_eps", type=float, default=0.03)
-    parser.add_argument("--logits_pretrain_ckpt", type=str,
-                        default="/mlspeech/data/gilad/logs/ASR_diffusion_ears/reverb/with_logits/logits_model_pretrain_width_768_lr_1e-4_score_pred_residual_model_complex_audio_and_prev_logits_baseline_weight.pt")
+    parser.add_argument("--logits_pretrain_ckpt", type=str, required=True, help="Path to save the pretrained logits model checkpoint")
     parser.add_argument("--wandb_project", type=str, default="logits_pretrain")
     parser.add_argument("--wandb_name", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=0, help="If >0, save snapshot every N steps.")
@@ -647,7 +524,7 @@ def add_argparse_args(parser: ArgumentParser):
     # Whisper
     parser.add_argument("--whisper_name", type=str, default="base")
     parser.add_argument("--whisper_lang", type=str, default="en")
-    parser.add_argument("--transcripts_path", type=str, default="/mlspeech/data/gilad/paper_ears_reverbed/transcripts.json")
+    parser.add_argument("--transcripts_path", type=str, required=True, help="Path to the transcripts JSON file")
 
     # SDE + DataModule
     parser.add_argument("--sde", type=str, choices=SDERegistry.get_all_names(), default="ouve")
@@ -721,17 +598,6 @@ def main():
     # ---- Checkpointing ----
     ckpt_dir = os.path.dirname(args.logits_pretrain_ckpt) or "."
     os.makedirs(ckpt_dir, exist_ok=True)
-
-    # best_ckpt = ModelCheckpoint(
-    #     dirpath=ckpt_dir,
-    #     filename=os.path.basename(args.logits_pretrain_ckpt).replace(".pt", "") + "-best",
-    #     monitor="train/loss_step",
-    #     mode="min",
-    #     save_top_k=1,
-    #     save_last=True,
-    #     save_weights_only=False,
-    #     every_n_train_steps=None,
-    # )
     best_ckpt = ModelCheckpoint(
         dirpath=ckpt_dir,
         filename=os.path.basename(args.logits_pretrain_ckpt).replace(".pt", "") + "-best",
