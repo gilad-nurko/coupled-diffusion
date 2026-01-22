@@ -18,8 +18,8 @@ from sgmse.util.other import pad_spec
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--test_dir", type=str, default='/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks/test/noisy', help='Directory containing the test data')
-    parser.add_argument("--enhanced_dir", type=str, default='/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks_test_enhanced_no_logits', help='Directory containing the enhanced data')
+    parser.add_argument("--test_dir", type=str, required=True, help="Directory containing the test data")
+    parser.add_argument("--enhanced_dir", type=str, required=True, help="Directory to save the enhanced data")
     parser.add_argument("--ckpt", type=str,  help='Path to model checkpoint')
     parser.add_argument("--sampler_type", type=str, default="pc", help="Sampler type for the PC sampler.")
     parser.add_argument("--corrector", type=str, choices=("ald", "langevin", "none"), default="ald", help="Corrector class for the PC sampler.")

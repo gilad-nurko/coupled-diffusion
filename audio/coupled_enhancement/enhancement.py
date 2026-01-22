@@ -33,14 +33,8 @@ def normalize_logits(step_logits_allowed: torch.Tensor,
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    # parser.add_argument("--test_dir", type=str, default='/mlspeech/data/gilad/paper_ears_reverbed/EARS-Reverb_v2_4sec_chunks/test/reverberant',
-    #                     help='Directory containing the test data')
-    # parser.add_argument("--enhanced_dir", type=str, default='/mlspeech/data/gilad/paper_ears_reverbed/EARS-Reverb_v2_4sec_chunks_test_enhanced_with_logits_nested_try2',
-    #                     help='Directory to save the enhanced data')
-    parser.add_argument("--test_dir", type=str, default='/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks/test/noisy',
-                        help='Directory containing the test data')
-    parser.add_argument("--enhanced_dir", type=str, default='/mlspeech/data/gilad/paper_ears_wham/EARS-WHAM_v2_4sec_chunks_test_enhanced_with_logits_nested_epoch44',
-                        help='Directory to save the enhanced data')
+    parser.add_argument("--test_dir", type=str, required=True, help="Directory containing the test data")
+    parser.add_argument("--enhanced_dir", type=str, required=True, help="Directory to save the enhanced data")
     parser.add_argument("--ckpt", type=str, required=True,
                         help='Path to model checkpoint')
     parser.add_argument("--sampler_type", type=str, default="pc",
