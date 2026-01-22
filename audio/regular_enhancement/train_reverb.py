@@ -68,7 +68,6 @@ def load_pretrained_diffusion_model(
                 print(f"Shape mismatch for {name}: keeping random initialization")
                 new_parameters.append(name)
         else:
-            # This is a new parameter (like self.class_processor, self.class_film_generator)
             new_parameters.append(name)
     
     # Load the filtered weights
@@ -99,11 +98,10 @@ if __name__ == '__main__':
           parser_.add_argument("--nolog", action='store_true', help="Turn off logging.")
           parser_.add_argument("--wandb_name", type=str, default=None, help="Name for wandb logger. If not set, a random name is generated.")
           parser_.add_argument("--ckpt", type=str, default=None, help="Resume training from checkpoint.")
-          parser_.add_argument("--pretrained_ckpt", type=str, default="/home/gilad/diffusion_EM/ASR_diffusion_ears/original_checkpoint/sgmse_original_weights_reverb_48k.ckpt", 
-                               help="Path to an older checkpoint whose overlapping params should initialise the new model.")
-          parser_.add_argument("--log_dir", type=str, default="/mlspeech/data/gilad/logs/ASR_diffusion_ears/reverb/without_logits", help="Directory to save logs.")
+          parser_.add_argument("--pretrained_ckpt", type=str, required=True,
+                              help="Path to an older checkpoint whose overlapping params should initialise the new model.")
+          parser_.add_argument("--log_dir", type=str, required=True, help="Directory to save logs.")
           parser_.add_argument("--save_ckpt_interval", type=int, default=50000, help="Save checkpoint interval.")
-          # parser_.add_argument("--test", action='store_true', help="Run in test mode - load checkpoint and run validation.")
           parser_.add_argument("--mode", type=str, choices=["train", "valid", "test"], default="train",
                               help="Run mode: 'train' to fit, 'valid' to validate on the validation set, 'test' to validate on the test set.")
           # Add new arguments for Whisper-guided model
@@ -136,7 +134,6 @@ if __name__ == '__main__':
      trainer_parser.add_argument("--devices", default="auto", help="How many gpus to use.")
      trainer_parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Accumulate gradients.")
      trainer_parser.add_argument("--max_epochs", type=int, default=-1, help="Number of epochs to train.")
-     # trainer_parser.add_argument("--precision", type=str, default="16-mixed", help="Set training precision.")
      
      WhisperGuidedScoreModel.add_argparse_args(
           parser.add_argument_group("ScoreModel", description=WhisperGuidedScoreModel.__name__))
@@ -218,14 +215,6 @@ if __name__ == '__main__':
           callbacks=callbacks
      )
 
-     # Train model
-     # if args.test:
-     #      if args.ckpt is None:
-     #           raise ValueError("Checkpoint path must be provided in test mode")
-     #      # Ensure data module is set up for validation
-     #      trainer.validate(model, ckpt_path=args.ckpt)
-     # else:
-     #      trainer.fit(model, ckpt_path=args.ckpt)
      if args.mode == "train":
           trainer.fit(model, ckpt_path=args.ckpt)
 

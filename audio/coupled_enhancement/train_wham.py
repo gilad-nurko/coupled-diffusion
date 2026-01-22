@@ -27,69 +27,6 @@ def get_argparse_groups(parser):
           groups[group.title] = argparse.Namespace(**group_dict)
      return groups
 
-# def load_pretrained_diffusion_model(
-#     model: WhisperGuidedScoreModel, 
-#     pretrained_ckpt_path: str,
-#     freeze_pretrained: bool = False
-# ) -> WhisperGuidedScoreModel:
-#     """
-#     Load pretrained weights into a new model with additional parameters.
-    
-#     Args:
-#         model: The new model with additional parameters
-#         pretrained_ckpt_path: Path to the pretrained checkpoint
-#         freeze_pretrained: Whether to freeze the loaded pretrained parameters
-    
-#     Returns:
-#         Model with loaded pretrained weights
-#     """
-#     print(f"Loading pretrained weights from: {pretrained_ckpt_path}")
-    
-#     # Load checkpoint
-#     checkpoint = torch.load(pretrained_ckpt_path, map_location='cpu', weights_only=False)
-    
-#     if 'state_dict' in checkpoint:
-#         pretrained_state_dict = checkpoint['state_dict']
-#     else:
-#         pretrained_state_dict = checkpoint
-    
-#     # Get current model parameters
-#     model_dict = model.state_dict()
-    
-#     # Filter pretrained weights to match current model
-#     pretrained_filtered = {}
-#     new_parameters = []
-    
-#     for name, param in model_dict.items():
-#         if name in pretrained_state_dict:
-#             pretrained_param = pretrained_state_dict[name]
-#             if param.shape == pretrained_param.shape:
-#                 pretrained_filtered[name] = pretrained_param
-#             else:
-#                 print(f"Shape mismatch for {name}: keeping random initialization")
-#                 new_parameters.append(name)
-#         else:
-#             # This is a new parameter (like self.class_processor, self.class_film_generator)
-#             new_parameters.append(name)
-    
-#     # Load the filtered weights
-#     model.load_state_dict(pretrained_filtered, strict=False)
-    
-#     print(f"Loaded {len(pretrained_filtered)} pretrained parameters")
-#     print(f"New/randomly initialized parameters: {len(new_parameters)}")
-
-#     # Optionally freeze pretrained parameters
-#     if freeze_pretrained:
-#         for name, param in model.named_parameters():
-#             if name in pretrained_filtered:
-#                 param.requires_grad = False
-
-#     if hasattr(model, "ema"):
-#         print("Initializing EMA with pretrained weights...")
-#         model._initialize_ema()
-    
-#     return model
-
 def load_pretrained_diffusion_model(
     model: WhisperGuidedScoreModel, 
     pretrained_ckpt_path: str,
@@ -133,7 +70,6 @@ def load_pretrained_diffusion_model(
                       f"-> keep random init")
                 new_parameters.append(name)
         else:
-            # not in old checkpoint → new param (e.g. logits stuff / whisper guidance)
             new_parameters.append(name)
 
     # --- actually load into model_state and then into the model ---
@@ -143,8 +79,6 @@ def load_pretrained_diffusion_model(
     print(f"Loaded {len(pretrained_filtered)} pretrained parameters")
     print(f"New/randomly initialized parameters: {len(new_parameters)}")
 
-    # Remember which params were pretrained (for debugging / optional unfreezing later)
-    # These are state_dict keys; for parameters they coincide with named_parameters() keys.
     model.pretrained_param_names = set(pretrained_filtered.keys())
 
     # --- freeze loaded params if requested ---
@@ -179,13 +113,12 @@ if __name__ == '__main__':
           parser_.add_argument("--nolog", action='store_true', help="Turn off logging.")
           parser_.add_argument("--wandb_name", type=str, default=None, help="Name for wandb logger. If not set, a random name is generated.")
           parser_.add_argument("--ckpt", type=str, default=None, help="Resume training from checkpoint.")
-          parser_.add_argument("--pretrained_ckpt", type=str, default="/home/gilad/diffusion_EM/ASR_diffusion_ears/original_checkpoint/sgmse_original_weights_wham_48k.ckpt", 
-                               help="Path to an older checkpoint whose overlapping params should initialise the new model.")
-          parser_.add_argument("--logits_pretrain_ckpt", type=str, default="/mlspeech/data/gilad/logs/ASR_diffusion_ears/wham/with_logits/logits_model_pretrain_width_768_lr_1e-4_score_pred_residual_model_complex_audio_and_prev_logits_baseline_weight-best.ckpt",
-                    help="Where to save/load the pretrained logits_model.")
-          parser_.add_argument("--log_dir", type=str, default="/mlspeech/data/gilad/logs/ASR_diffusion_ears/wham/with_logits", help="Directory to save logs.")
+          parser_.add_argument("--pretrained_ckpt", type=str, required=True,
+                              help="Path to an older checkpoint whose overlapping params should initialise the new model.")
+          parser_.add_argument("--logits_pretrain_ckpt", type=str, required=True,
+                              help="Where to load the pretrained logits_model from.")
+          parser_.add_argument("--log_dir", type=str, required=True, help="Directory to save logs.")
           parser_.add_argument("--save_ckpt_interval", type=int, default=50000, help="Save checkpoint interval.")
-          # parser_.add_argument("--test", action='store_true', help="Run in test mode - load checkpoint and run validation.")
           parser_.add_argument("--mode", type=str, choices=["train", "valid", "test"], default="train",
                               help="Run mode: 'train' to fit, 'valid' to validate on the validation set, 'test' to validate on the test set.")
           # Add new arguments for Whisper-guided model
@@ -220,7 +153,6 @@ if __name__ == '__main__':
      trainer_parser.add_argument("--devices", default="auto", help="How many gpus to use.")
      trainer_parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Accumulate gradients.")
      trainer_parser.add_argument("--max_epochs", type=int, default=-1, help="Number of epochs to train.")
-     # trainer_parser.add_argument("--precision", type=str, default="16-mixed", help="Set training precision.")
      
      WhisperGuidedScoreModel.add_argparse_args(
           parser.add_argument_group("ScoreModel", description=WhisperGuidedScoreModel.__name__))
@@ -261,10 +193,6 @@ if __name__ == '__main__':
             args.pretrained_ckpt,
             freeze_pretrained=getattr(args, 'freeze_pretrained', False)
         )
-     
-     # if getattr(args, "logits_pretrain_ckpt", None):
-     #      ok = model._load_pretrained_logits_if_available()
-     #      print(f"[logits pretrain] load status: {ok} ({args.logits_pretrain_ckpt})")
 
      # Set up logger configuration
      if args.nolog:
@@ -310,21 +238,7 @@ if __name__ == '__main__':
      num_sanity_val_steps=0,
      callbacks=callbacks,
      )
-     # trainer = pl.Trainer(
-     #      **vars(arg_groups['Trainer']),
-     #      strategy="ddp_find_unused_parameters_true", logger=logger,
-     #      log_every_n_steps=10, num_sanity_val_steps=0,
-     #      callbacks=callbacks
-     # )
-
-     # Train model
-     # if args.test:
-     #      if args.ckpt is None:
-     #           raise ValueError("Checkpoint path must be provided in test mode")
-     #      # Ensure data module is set up for validation
-     #      trainer.validate(model, ckpt_path=args.ckpt)
-     # else:
-     #      trainer.fit(model, ckpt_path=args.ckpt)
+    
      if args.mode == "train":
           trainer.fit(model, ckpt_path=args.ckpt)
 
