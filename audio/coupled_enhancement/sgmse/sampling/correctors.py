@@ -68,7 +68,7 @@ class AnnealedLangevinDynamics(Corrector):
 
     def update_fn(self, x, y, t, is_logits=False, logits=None, logits_cond=None, audio_embedding=None, *args):
         n_steps = self.n_steps
-        target_snr = self.snr# if not is_logits else self.snr * (1/3)
+        target_snr = self.snr
         if is_logits:
             for _ in range(n_steps):
                 std = self.sde.marginal_prob(logits, logits_cond, t, is_logits=True, *args)[1]
