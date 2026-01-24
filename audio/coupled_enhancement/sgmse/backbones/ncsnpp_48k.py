@@ -308,7 +308,7 @@ class NCSNpp_48k(nn.Module):
                 h = modules[m_idx](hs[-1], temb)
                 m_idx += 1
                 # Attention layer (optional)
-                if h.shape[-2] in self.attn_resolutions: # edit: check H dim (-2) not W dim (-1)
+                if h.shape[-2] in self.attn_resolutions: 
                     h = modules[m_idx](h)
                     m_idx += 1
                 hs.append(h)

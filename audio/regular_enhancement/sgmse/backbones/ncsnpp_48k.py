@@ -308,7 +308,7 @@ class NCSNpp_48k(nn.Module):
                 h = modules[m_idx](hs[-1], temb)
                 m_idx += 1
                 # Attention layer (optional)
-                if h.shape[-2] in self.attn_resolutions: # edit: check H dim (-2) not W dim (-1)
+                if h.shape[-2] in self.attn_resolutions: 
                     h = modules[m_idx](h)
                     m_idx += 1
                 hs.append(h)
@@ -346,33 +346,11 @@ class NCSNpp_48k(nn.Module):
         m_idx += 1
 
         pyramid = None
-        # def center_fit(h, target_h, target_w):
-        #     H, W = h.shape[-2:]
-        #     dh, dw = H - target_h, W - target_w
-        #     # center-crop if bigger
-        #     if dh > 0:
-        #         top = dh // 2; bot = dh - top
-        #         h = h[:, :, top:H-bot, :]
-        #     if dw > 0:
-        #         left = dw // 2; right = dw - left
-        #         h = h[:, :, :, left:W-right]
-        #     # symmetric pad if smaller
-        #     H, W = h.shape[-2:]; dh, dw = target_h - H, target_w - W
-        #     if dh > 0 or dw > 0:
-        #         pad_top = dh // 2 if dh > 0 else 0
-        #         pad_bot = dh - pad_top if dh > 0 else 0
-        #         pad_left = dw // 2 if dw > 0 else 0
-        #         pad_right = dw - pad_left if dw > 0 else 0
-        #         h = F.pad(h, (pad_left, pad_right, pad_top, pad_bot))
-        #     return h
 
         # Upsampling block
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = modules[m_idx](torch.cat([h, hs.pop()], dim=1), temb)
-                # skip = hs.pop()
-                # h = center_fit(h, skip.shape[-2], skip.shape[-1])
-                # h = modules[m_idx](torch.cat([h, skip], dim=1), temb)
                 m_idx += 1
 
             # edit: from -1 to -2

@@ -178,7 +178,6 @@ class LogitsDenoiser(nn.Module):
         nn.init.zeros_(self.correction_head.bias)
         
         # # Optional: learnable scale for corrections
-        # self.correction_scale = nn.Parameter(torch.tensor(0.1))
         self.baseline_weight_mlp = nn.Sequential(
             nn.Linear(cond_dim, cond_dim // 2),
             nn.SiLU(),
@@ -229,7 +228,6 @@ class LogitsDenoiser(nn.Module):
         residual = x_t - noisy_logits  # [B, C]
         if std_l.dim() == 1:
             std_l = std_l.unsqueeze(-1)  # [B, 1]
-        baseline_noise = residual / std_l  # [B, C]
         baseline_score = - residual / (std_l ** 2)  # [B, C]
         
         # ===== TIME EMBEDDING =====
@@ -283,12 +281,9 @@ class LogitsDenoiser(nn.Module):
         # ===== PREDICT CORRECTION =====
         h = self.out_norm(h)
         correction = self.correction_head(h)  # [B, C]
-        # correction = self.correction_scale * correction  # Scale down corrections
         
         # ===== FINAL PREDICTION = BASELINE + CORRECTION =====
-        # predicted_noise = baseline_noise + correction
         baseline_weight = self.baseline_weight_mlp(t_vec)  # [B, 1]
-        # predicted_score = baseline_score + correction
         predicted_score = baseline_weight * baseline_score + correction
         
         return predicted_score

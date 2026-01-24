@@ -122,7 +122,6 @@ class NCSNpp_48k_Logits(nn.Module):
         # Map a 2D logits feature map to bottleneck channels (1x1 conv)
         self.mid_logits_to_h = nn.Conv2d(self.logits_proj_channels, self.bottleneck_ch, kernel_size=1, bias=True)
         # Learnable gate (start at 0 => exact old behavior)
-        # self.mid_gate = nn.Parameter(torch.tensor(0.0))
         self.mid_gate = nn.Sequential(
             nn.Linear(nf * 4, 64),  # nf * 4 is the temb dimension
             get_act(nonlinearity),
@@ -337,7 +336,7 @@ class NCSNpp_48k_Logits(nn.Module):
                 h = modules[m_idx](hs[-1], temb)
                 m_idx += 1
                 # Attention layer (optional)
-                if h.shape[-2] in self.attn_resolutions: # edit: check H dim (-2) not W dim (-1)
+                if h.shape[-2] in self.attn_resolutions:
                     h = modules[m_idx](h)
                     m_idx += 1
                 hs.append(h)
@@ -404,7 +403,6 @@ class NCSNpp_48k_Logits(nn.Module):
             cond_h = self.mid_logits_to_h(cond_map)                  # [B, Cb, Hm, Wm]
             gate_value = self.mid_gate(temb)  # [B, 1]
             gate_value = gate_value.view(B2, 1, 1, 1)  # Reshape for broadcasting
-            # h = h + self.mid_gate * cond_h
             h = h + gate_value * cond_h
 
         pyramid = None
