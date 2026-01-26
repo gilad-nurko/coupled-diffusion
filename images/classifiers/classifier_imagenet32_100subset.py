@@ -1,7 +1,7 @@
 import os
 import random
 from tqdm import tqdm
-
+import argparse
 import numpy as np
 from PIL import Image
 
@@ -153,6 +153,11 @@ class RemappedSubset(Dataset):
         new_label = self.old_to_new[int(old_label)]
         return img, new_label
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--imagenet32_root", type=str, required=True, help="Path to the root directory of ImageNet32 dataset")
+    parser.add_argument("--save_dir", type=str, required=True, help="Directory to save checkpoints")
+    return parser.parse_args()
 
 def build_imagenet32_datasets(root, num_subset_classes=100, seed=12345):
     """
@@ -204,9 +209,11 @@ def build_imagenet32_datasets(root, num_subset_classes=100, seed=12345):
 
 
 def main():
-    imagenet32_root = "/mlspeech/data/gilad/imagenet32"
+    args = parse_args()
 
-    save_dir = "./classifier"
+    imagenet32_root = args.imagenet32_root
+    save_dir = args.save_dir
+
     os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, "classifier_weights_imagenet32_100subset.pth")
 

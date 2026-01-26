@@ -54,6 +54,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                               help="Number of iterations for sampling in full mode.")
         parser.add_argument("--logits_diffusion_steps", type=int, default=5,
                               help="Number of diffusion steps for the logits in the nested mode.")
+        parser.add_argument("--transcripts_path", type=str, required=True, help="Path to transcripts JSON mapping {category: transcript_str}.")
         return parser
 
     def __init__(

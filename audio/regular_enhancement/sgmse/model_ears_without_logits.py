@@ -104,6 +104,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
         parser.add_argument("--sr", type=int, default=48000, help="The sample rate of the audio files.")
         parser.add_argument("--lang", type=str, default="en", help="Language for Whisper decoding")
         parser.add_argument("--debug", type=bool, default=False, help="Whether to enable debug visualization during validation")
+        parser.add_argument("--transcripts_path", type=str, required=True, help="Path to transcripts JSON mapping {category: transcript_str}.")
         return parser
 
     def __init__(
