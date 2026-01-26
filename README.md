@@ -72,8 +72,16 @@ Audio experiments focus on speech enhancement and de-reverberation using the EAR
 
 Prepare the **EARS WHAM** (noise) or **EARS Reverb** (reverberation) datasets using these scripts:
 
-* `audio/create_ears_WHAM/generate_ears_wham.py`
-* `audio/create_ears_reverbed/generate_ears_reverb.py`
+```bash
+# Example for EARS WHAM
+python audio/create_ears_WHAM/generate_ears_wham.py \
+    --data_dir /path/to/save/generated_dataset
+
+# Example for EARS Reverb
+python audio/create_ears_reverbed/generate_ears_reverb.py \
+    --data_dir /path/to/save/generated_dataset
+
+```
 
 ### 2. Logits Model Pretraining
 
