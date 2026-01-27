@@ -2,6 +2,10 @@
 
 This repository implements **Coupled Diffusion**, a domain-agnostic framework that integrates two interacting diffusion models—one operating on the input signal and another on the classifier's output logits—to enable mutual guidance during enhancement. This formulation allows the evolving class logits to guide signal reconstruction towards discriminative regions while the enhancing signal refines the class estimation.
 
+## Repository Scope
+
+**Note:** For simplicity, the current public code includes one example dataset per modality (ImageNet-32-100 for images and EARS for audio). These scripts demonstrate the full training and inference pipeline for all strategies. Support for additional datasets from the paper is being added incrementally.
+
 ## Joint Diffusion Strategies
 
 The following strategies are implemented for both image and audio experiments to model the joint distribution of the input and logits:
