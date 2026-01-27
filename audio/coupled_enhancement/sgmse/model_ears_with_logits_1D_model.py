@@ -652,32 +652,6 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 text = tok.decode(constrained_tokens)
                 return text, mel, step_logits_allowed, audio_embedding
             
-            def decode_from_allowed_logits(
-                step_logits_allowed: torch.Tensor,  # [1, S, |A|] or [S, |A|]
-            ):
-                """
-                Greedy decode from per-step logits over a restricted token set.
-
-                step_logits_allowed: (1, S, |A|) or (S, |A|)
-                    - S = number of decoding steps
-                    - |A| = size of allowed token set
-                allowed_ids_t: (|A|,)
-                    - mapping from restricted indices -> real Whisper token IDs
-                tok: Whisper tokenizer (same one you used before)
-                """
-                # Drop batch dim if present
-                if step_logits_allowed.dim() == 3:
-                    # [1, S, |A|] -> [S, |A|]
-                    step_logits_allowed = step_logits_allowed[0]
-                best_idx_per_step = step_logits_allowed.argmax(dim=-1)        # [S]
-                token_list = allowed_ids_t[best_idx_per_step].tolist()    # [S]
-
-                if tok.eot in token_list:
-                    token_list = token_list[:token_list.index(tok.eot)]
-
-                text = tok.decode(token_list)
-                return text
-            
             def expand_contractions(s: str) -> str:
                 """Convert only 'eight pm' to '8pm' and 'seventy five percent' to '75%'."""
                 result = s
@@ -724,8 +698,7 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 clean_transcript, clean_mel, clean_logits, clean_audio_embedding = decode_constrained(x_16k, target_mean, target_std)
 
                 # Enhance the noisy speech (keep native sr for enhancement)
-                x_hat, logits_hat = self.enhance(y_tensor.unsqueeze(0), corrupted_logits.unsqueeze(0), corrupted_audio_embedding, N=self.sde.N, snr=0.5)
-                logits_text = decode_from_allowed_logits(logits_hat.detach())
+                x_hat, _ = self.enhance(y_tensor.unsqueeze(0), corrupted_logits.unsqueeze(0), corrupted_audio_embedding, N=self.sde.N, snr=0.5)
 
                 # Resample enhanced to 16k for Whisper + metrics that expect 16k
                 if sr_y != 16000:
@@ -738,13 +711,11 @@ class WhisperGuidedScoreModel(pl.LightningModule):
                 enhanced_transcript_processed = expand_contractions(self.text_normalizer(enhanced_transcript))
                 corrupted_transcript_processed = expand_contractions(self.text_normalizer(corrupted_transcript))
                 clean_transcript_processed = expand_contractions(self.text_normalizer(clean_transcript))
-                logits_transcript_processed = expand_contractions(self.text_normalizer(logits_text))
 
                 # --- collect WER strings ---
                 o_list.append(enhanced_transcript_processed)
                 o_list_corrupted.append(corrupted_transcript_processed)
                 o_list_clean.append(clean_transcript_processed)
-                o_list_logits.append(logits_transcript_processed)
 
                 # --- signal metrics ---
                 try:
@@ -776,14 +747,12 @@ class WhisperGuidedScoreModel(pl.LightningModule):
             estoi_avg = estoi_sum / len(clean_files)
             wer_enhanced  = self.wer_metric(o_list, o_list_clean)
             wer_corrupted = self.wer_metric(o_list_corrupted, o_list_clean)
-            wer_logits    = self.wer_metric(o_list_logits, o_list_clean)
 
             self.log('pesq',  (pesq_sum / pesq_cnt) if pesq_cnt > 0 else float('nan'), on_step=False, on_epoch=True, sync_dist=True)
             self.log('si_sdr', si_sdr_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('estoi',  estoi_avg, on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_enhanced',  wer_enhanced,  on_step=False, on_epoch=True, sync_dist=True)
             self.log('wer_corrupted', wer_corrupted, on_step=False, on_epoch=True, sync_dist=True)
-            self.log('wer_logits', wer_logits, on_step=False, on_epoch=True, sync_dist=True)
 
         # keep your training loss path unchanged
         loss = self._step(batch, batch_idx)
